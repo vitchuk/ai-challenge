@@ -1,0 +1,11 @@
+{
+  "name": "ai-challenge",
+  "version": "1.0.0",
+  "description": "Simple chat app talking to the DeepSeek API",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "license": "MIT"
+}

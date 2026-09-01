@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepSeek Chat</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="chat">
+    <header class="chat__header">
+      <h1>DeepSeek Chat</h1>
+      <span class="chat__subtitle">deepseek-chat</span>
+    </header>
+
+    <main id="messages" class="chat__messages"></main>
+
+    <form id="form" class="chat__form">
+      <textarea
+        id="input"
+        class="chat__input"
+        rows="1"
+        placeholder="Напишите сообщение..."
+      ></textarea>
+      <button id="send" type="submit" class="chat__send">Отправить</button>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

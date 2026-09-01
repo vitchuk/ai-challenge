@@ -1,0 +1,71 @@
+# ai-challenge
+
+Простое чат-приложение для общения с [DeepSeek API](https://api-docs.deepseek.com/). Клиент — статическая HTML-страница (JS + CSS), сервер — Node.js, который проксирует запросы к DeepSeek и не раскрывает API-ключ в браузере.
+
+## Возможности
+
+- Чат с моделью `deepseek-chat`
+- Потоковый вывод ответов (SSE, текст появляется постепенно)
+- API-ключ хранится только на сервере
+- Без сторонних зависимостей — используется встроенный `http` и `fetch` из Node.js
+
+## Требования
+
+- Node.js 20.6+ (нужна поддержка `--env-file`), рекомендуется 22+
+
+## Установка
+
+```bash
+git clone https://github.com/vitchuk/ai-challenge.git
+cd ai-challenge
+```
+
+Создайте файл `.env` на основе примера и укажите ваш API-ключ:
+
+```bash
+cp .env.example .env   # Windows: copy .env.example .env
+```
+
+Откройте `.env` и вставьте ключ:
+
+```
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+PORT=3000
+```
+
+## Запуск
+
+```bash
+npm start
+```
+
+Откройте в браузере: <http://localhost:3000>
+
+## Структура проекта
+
+```
+ai-challenge/
+├── server.js          # HTTP-сервер: статика + POST /api/chat (SSE-прокси в DeepSeek)
+├── public/
+│   ├── index.html     # разметка чата
+│   ├── style.css      # стили
+│   └── app.js         # отправка, парсинг SSE-потока, вывод текста
+├── .env.example       # пример конфигурации
+├── .gitignore
+├── package.json
+└── README.md
+```
+
+## Как это работает
+
+1. Клиент отправляет `{ messages: [...] }` на `POST /api/chat`.
+2. Сервер добавляет API-ключ и вызывает `https://api.deepseek.com/chat/completions` с `stream: true`.
+3. Ответы DeepSeek (SSE) пересылаются клиенту, который парсит чанки и постепенно выводит текст.
+
+## Настройка порта
+
+По умолчанию используется порт `3000`. Чтобы изменить, задайте `PORT` в `.env` или переменной окружения.
+
+## Лицензия
+
+MIT
