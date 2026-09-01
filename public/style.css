@@ -107,7 +107,6 @@ body {
 .chat__input {
   flex: 1;
   resize: none;
-  max-height: 160px;
   padding: 12px 14px;
   border-radius: 10px;
   border: 1px solid var(--border);

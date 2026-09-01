@@ -48,6 +48,12 @@ async function* parseSSE(response) {
   }
 }
 
+function setBubbleText(el, text) {
+  el.classList.remove('message--empty');
+  el.textContent = text;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 async function sendMessage(text) {
   history.push({ role: 'user', content: text });
   addMessage('user', text);
@@ -71,15 +77,14 @@ async function sendMessage(text) {
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) {
         full += delta;
-        assistantEl.textContent = full;
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+        setBubbleText(assistantEl, full);
       }
     }
 
-    assistantEl.textContent = full || '(пустой ответ)';
+    setBubbleText(assistantEl, full || '(пустой ответ)');
     history.push({ role: 'assistant', content: full });
   } catch (err) {
-    assistantEl.textContent = `Ошибка: ${err.message}`;
+    setBubbleText(assistantEl, `Ошибка: ${err.message}`);
     assistantEl.classList.add('message--error');
     if (history[history.length - 1].role === 'user') history.pop();
   }
@@ -87,7 +92,15 @@ async function sendMessage(text) {
 
 function autoResize() {
   input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  const cs = getComputedStyle(input);
+  const lineHeight = parseFloat(cs.lineHeight);
+  const padding = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+  const border = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+  const maxTwoLines = lineHeight * 2 + padding + border;
+  const contentHeight = input.scrollHeight + border;
+  const fits = contentHeight <= maxTwoLines;
+  input.style.height = Math.min(contentHeight, maxTwoLines) + 'px';
+  input.style.overflowY = fits ? 'hidden' : 'auto';
 }
 
 form.addEventListener('submit', async (e) => {
@@ -113,4 +126,5 @@ input.addEventListener('keydown', (e) => {
 });
 
 input.addEventListener('input', autoResize);
+autoResize();
 ensureWelcome();
