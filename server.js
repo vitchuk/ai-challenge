@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { Readable } = require('stream');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
@@ -109,9 +110,10 @@ async function handleChat(req, res) {
     'X-Accel-Buffering': 'no'
   });
 
-  upstream.body.pipe(res);
-  upstream.body.on('error', () => res.end());
-  req.on('close', () => upstream.body.destroy());
+  const stream = Readable.fromWeb(upstream.body);
+  stream.pipe(res);
+  stream.on('error', () => res.end());
+  req.on('close', () => stream.destroy());
 }
 
 const server = http.createServer(async (req, res) => {
