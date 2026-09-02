@@ -92,7 +92,8 @@ async function handleChat(req, res) {
     body: JSON.stringify({
       model: MODEL,
       messages,
-      stream: true
+      stream: true,
+      stream_options: { include_usage: true }
     })
   });
 

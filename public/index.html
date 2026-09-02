@@ -3,28 +3,40 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DeepSeek Chat</title>
+  <title>Помогатор2К</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="chat">
-    <header class="chat__header">
-      <h1>DeepSeek Chat</h1>
-      <span class="chat__subtitle">deepseek-chat</span>
-    </header>
+  <div class="app">
+    <div class="chat">
+      <header class="chat__header">
+        <h1>Чат</h1>
+        <span class="chat__subtitle">deepseek-chat</span>
+      </header>
 
-    <main id="messages" class="chat__messages"></main>
+      <main id="messages" class="chat__messages"></main>
 
-    <form id="form" class="chat__form">
-      <textarea
-        id="input"
-        class="chat__input"
-        rows="1"
-        placeholder="Напишите сообщение..."
-      ></textarea>
-      <button id="send" type="submit" class="chat__send">Отправить</button>
-    </form>
+      <form id="form" class="chat__form">
+        <textarea
+          id="input"
+          class="chat__input"
+          rows="1"
+          placeholder="Напишите сообщение..."
+        ></textarea>
+        <button id="send" type="submit" class="chat__send">Отправить</button>
+      </form>
+    </div>
+
+    <aside class="settings">
+      <div class="settings__title">Помогатор2К</div>
+      <div class="settings__divider"></div>
+      <div class="settings__placeholder">Настройки появятся здесь</div>
+    </aside>
   </div>
+
+  <footer class="statusbar">
+    Сожжено токенов: <span id="tokens-total" class="statusbar__value">0</span>
+  </footer>
 
   <script src="app.js"></script>
 </body>

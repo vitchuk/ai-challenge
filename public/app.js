@@ -2,14 +2,27 @@ const messagesEl = document.getElementById('messages');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const tokensTotalEl = document.getElementById('tokens-total');
 
 const history = [];
+
+const MESSAGE_OVERHEAD_TOKENS = 4;
+
+let tokensBurned = 0;
+let prevUsage = null;
+
+function renderTotal() {
+  tokensTotalEl.textContent = String(tokensBurned);
+}
 
 function addMessage(role, text) {
   const el = document.createElement('div');
   el.classList.add('message', `message--${role}`);
   if (!text) el.classList.add('message--empty');
-  el.textContent = text || '...';
+  const content = document.createElement('div');
+  content.className = 'message__content';
+  content.textContent = text || '...';
+  el.appendChild(content);
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return el;
@@ -50,16 +63,32 @@ async function* parseSSE(response) {
 
 function setBubbleText(el, text) {
   el.classList.remove('message--empty');
-  el.textContent = text;
+  el.querySelector('.message__content').textContent = text;
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function setBubbleTokens(el, n) {
+  let hint = el.querySelector('.message__tokens');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.className = 'message__tokens';
+    el.appendChild(hint);
+  }
+  hint.textContent = `токенов: ${n}`;
+}
+
+function userMessageTokens(usage) {
+  const prevTotal = prevUsage ? prevUsage.prompt_tokens + prevUsage.completion_tokens : 0;
+  return Math.max(0, usage.prompt_tokens - prevTotal - MESSAGE_OVERHEAD_TOKENS);
 }
 
 async function sendMessage(text) {
   history.push({ role: 'user', content: text });
-  addMessage('user', text);
+  const userEl = addMessage('user', text);
 
   const assistantEl = addMessage('assistant', '');
   let full = '';
+  let usage = null;
 
   try {
     const res = await fetch('/api/chat', {
@@ -74,6 +103,7 @@ async function sendMessage(text) {
     }
 
     for await (const chunk of parseSSE(res)) {
+      if (chunk.usage) usage = chunk.usage;
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) {
         full += delta;
@@ -83,6 +113,17 @@ async function sendMessage(text) {
 
     setBubbleText(assistantEl, full || '(пустой ответ)');
     history.push({ role: 'assistant', content: full });
+
+    if (usage) {
+      setBubbleTokens(userEl, userMessageTokens(usage));
+      setBubbleTokens(assistantEl, usage.completion_tokens);
+      tokensBurned += usage.total_tokens;
+      prevUsage = {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens
+      };
+      renderTotal();
+    }
   } catch (err) {
     setBubbleText(assistantEl, `Ошибка: ${err.message}`);
     assistantEl.classList.add('message--error');
@@ -127,4 +168,5 @@ input.addEventListener('keydown', (e) => {
 
 input.addEventListener('input', autoResize);
 autoResize();
+renderTotal();
 ensureWelcome();
