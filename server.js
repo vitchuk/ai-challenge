@@ -6,7 +6,9 @@ const { Readable } = require('stream');
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
-const MODEL = 'deepseek-chat';
+const DEEPSEEK_MODELS_URL = 'https://api.deepseek.com/models';
+const DEFAULT_MODEL = 'deepseek-chat';
+const MODEL_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -83,6 +85,9 @@ async function handleChat(req, res) {
     return;
   }
 
+  const rawModel = typeof body.model === 'string' ? body.model.trim() : '';
+  const model = rawModel && MODEL_NAME_RE.test(rawModel) ? rawModel : DEFAULT_MODEL;
+
   const upstream = await fetch(DEEPSEEK_URL, {
     method: 'POST',
     headers: {
@@ -90,7 +95,7 @@ async function handleChat(req, res) {
       Authorization: `Bearer ${DEEPSEEK_API_KEY}`
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       messages,
       stream: true,
       stream_options: { include_usage: true }
@@ -117,7 +122,39 @@ async function handleChat(req, res) {
   req.on('close', () => stream.destroy());
 }
 
+async function handleModels(res) {
+  if (!DEEPSEEK_API_KEY) {
+    sendJson(res, 500, { error: 'DEEPSEEK_API_KEY is not set on the server' });
+    return;
+  }
+
+  try {
+    const upstream = await fetch(DEEPSEEK_MODELS_URL, {
+      headers: { Authorization: `Bearer ${DEEPSEEK_API_KEY}` }
+    });
+    if (!upstream.ok) {
+      sendJson(res, upstream.status, { error: `DeepSeek API error: ${upstream.status}` });
+      return;
+    }
+    const data = await upstream.text();
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(data);
+  } catch {
+    sendJson(res, 502, { error: 'Failed to reach DeepSeek API' });
+  }
+}
+
 const server = http.createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/api/models') {
+    try {
+      await handleModels(res);
+    } catch (err) {
+      console.error(err);
+      sendJson(res, 500, { error: 'Internal server error' });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/api/chat') {
     try {
       await handleChat(req, res);

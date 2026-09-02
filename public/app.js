@@ -3,8 +3,11 @@ const form = document.getElementById('form');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const tokensTotalEl = document.getElementById('tokens-total');
+const modelSelect = document.getElementById('model-select');
 
 const history = [];
+
+const FALLBACK_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
 
 const MESSAGE_OVERHEAD_TOKENS = 4;
 
@@ -13,6 +16,37 @@ let prevUsage = null;
 
 function renderTotal() {
   tokensTotalEl.textContent = String(tokensBurned);
+}
+
+function currentModel() {
+  return modelSelect.value || FALLBACK_MODELS[0];
+}
+
+function fillModelOptions(ids) {
+  const preferred = ids.includes(FALLBACK_MODELS[0]) ? FALLBACK_MODELS[0] : ids[0];
+  modelSelect.innerHTML = '';
+  for (const id of ids) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    modelSelect.appendChild(opt);
+  }
+  modelSelect.value = preferred;
+}
+
+async function loadModels() {
+  try {
+    const res = await fetch('/api/models');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const ids = (Array.isArray(data.data) ? data.data : [])
+      .map((m) => m && m.id)
+      .filter((id) => typeof id === 'string');
+    if (ids.length === 0) throw new Error('empty model list');
+    fillModelOptions(ids);
+  } catch {
+    fillModelOptions(FALLBACK_MODELS);
+  }
 }
 
 function addMessage(role, text) {
@@ -77,6 +111,19 @@ function setBubbleTokens(el, n) {
   hint.textContent = `токенов: ${n}`;
 }
 
+function appendReasoning(el, text) {
+  let node = el.querySelector('.message__reasoning');
+  if (!node) {
+    el.classList.remove('message--empty');
+    el.querySelector('.message__content').textContent = '';
+    node = document.createElement('div');
+    node.className = 'message__reasoning';
+    el.insertBefore(node, el.querySelector('.message__content'));
+  }
+  node.textContent += text;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 function userMessageTokens(usage) {
   const prevTotal = prevUsage ? prevUsage.prompt_tokens + prevUsage.completion_tokens : 0;
   return Math.max(0, usage.prompt_tokens - prevTotal - MESSAGE_OVERHEAD_TOKENS);
@@ -94,7 +141,7 @@ async function sendMessage(text) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: history })
+      body: JSON.stringify({ messages: history, model: currentModel() })
     });
 
     if (!res.ok || !res.body) {
@@ -104,9 +151,10 @@ async function sendMessage(text) {
 
     for await (const chunk of parseSSE(res)) {
       if (chunk.usage) usage = chunk.usage;
-      const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta) {
-        full += delta;
+      const delta = chunk.choices?.[0]?.delta;
+      if (delta?.reasoning_content) appendReasoning(assistantEl, delta.reasoning_content);
+      if (delta?.content) {
+        full += delta.content;
         setBubbleText(assistantEl, full);
       }
     }
@@ -169,4 +217,5 @@ input.addEventListener('keydown', (e) => {
 input.addEventListener('input', autoResize);
 autoResize();
 renderTotal();
+loadModels();
 ensureWelcome();

@@ -10,8 +10,9 @@
   <div class="app">
     <div class="chat">
       <header class="chat__header">
-        <h1>Чат</h1>
-        <span class="chat__subtitle">deepseek-chat</span>
+        <select id="model-select" class="chat__model" aria-label="Модель">
+          <option value="deepseek-chat">deepseek-chat</option>
+        </select>
       </header>
 
       <main id="messages" class="chat__messages"></main>
