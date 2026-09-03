@@ -111,17 +111,47 @@ function setBubbleTokens(el, n) {
   hint.textContent = `токенов: ${n}`;
 }
 
-function appendReasoning(el, text) {
+function createReasoning(el) {
   let node = el.querySelector('.message__reasoning');
-  if (!node) {
-    el.classList.remove('message--empty');
-    el.querySelector('.message__content').textContent = '';
-    node = document.createElement('div');
-    node.className = 'message__reasoning';
-    el.insertBefore(node, el.querySelector('.message__content'));
-  }
-  node.textContent += text;
+  if (node) return node;
+
+  el.classList.remove('message--empty');
+  el.querySelector('.message__content').textContent = '';
+
+  node = document.createElement('details');
+  node.className = 'message__reasoning';
+
+  const summary = document.createElement('summary');
+  const spinner = document.createElement('span');
+  spinner.className = 'message__reasoning-spinner';
+  const chevron = document.createElement('span');
+  chevron.className = 'message__reasoning-chevron';
+  chevron.textContent = '\u25B8';
+  const label = document.createElement('span');
+  label.className = 'message__reasoning-label';
+  label.textContent = 'Размышление';
+  summary.append(spinner, chevron, label);
+  node.appendChild(summary);
+
+  const body = document.createElement('div');
+  body.className = 'message__reasoning-body';
+  node.appendChild(body);
+
+  el.insertBefore(node, el.querySelector('.message__content'));
+  return node;
+}
+
+function appendReasoning(el, text) {
+  const node = createReasoning(el);
+  node.querySelector('.message__reasoning-body').textContent += text;
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function finishReasoning(el) {
+  const node = el.querySelector('.message__reasoning');
+  if (!node) return;
+  const spinner = node.querySelector('.message__reasoning-spinner');
+  if (spinner) spinner.remove();
 }
 
 function userMessageTokens(usage) {
@@ -135,6 +165,7 @@ async function sendMessage(text) {
 
   const assistantEl = addMessage('assistant', '');
   let full = '';
+  let thinking = false;
   let usage = null;
 
   try {
@@ -152,12 +183,21 @@ async function sendMessage(text) {
     for await (const chunk of parseSSE(res)) {
       if (chunk.usage) usage = chunk.usage;
       const delta = chunk.choices?.[0]?.delta;
-      if (delta?.reasoning_content) appendReasoning(assistantEl, delta.reasoning_content);
+      if (delta?.reasoning_content) {
+        thinking = true;
+        appendReasoning(assistantEl, delta.reasoning_content);
+      }
       if (delta?.content) {
+        if (thinking) {
+          thinking = false;
+          finishReasoning(assistantEl);
+        }
         full += delta.content;
         setBubbleText(assistantEl, full);
       }
     }
+
+    if (thinking) finishReasoning(assistantEl);
 
     setBubbleText(assistantEl, full || '(пустой ответ)');
     history.push({ role: 'assistant', content: full });
