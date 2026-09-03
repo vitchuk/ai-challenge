@@ -89,6 +89,25 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.chat__messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat__messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat__messages::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 4px;
+}
+
+.chat__messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 140, 255, 0.7);
 }
 
 .message {
@@ -158,6 +177,25 @@ body {
   font-style: italic;
   max-height: 240px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.message__reasoning-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.message__reasoning-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.message__reasoning-body::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 3px;
+}
+
+.message__reasoning-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 140, 255, 0.7);
 }
 
 @keyframes reasoning-spin {
