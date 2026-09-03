@@ -203,6 +203,14 @@ function renderJsonEnvelope(el, thinking, response, date, usage) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+function emptyResponseText(usage, finishReason) {
+  if (finishReason === 'length') {
+    const limit = maxTokensInput.value || (usage ? usage.completion_tokens : '');
+    return `<LLM уперлась в ограничение по токенам: ${limit}>`;
+  }
+  return '(пустой ответ)';
+}
+
 function userMessageTokens(usage) {
   const prevTotal = prevUsage ? prevUsage.prompt_tokens + prevUsage.completion_tokens : 0;
   return Math.max(0, usage.prompt_tokens - prevTotal - MESSAGE_OVERHEAD_TOKENS);
@@ -219,6 +227,7 @@ async function sendMessage(text) {
   let thinkingText = '';
   let thinking = false;
   let usage = null;
+  let finishReason = null;
 
   try {
     const outgoingMessages = jsonMode
@@ -242,6 +251,7 @@ async function sendMessage(text) {
 
     for await (const chunk of parseSSE(res)) {
       if (chunk.usage) usage = chunk.usage;
+      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const delta = chunk.choices?.[0]?.delta;
       if (delta?.reasoning_content) {
         thinking = true;
@@ -262,10 +272,11 @@ async function sendMessage(text) {
 
     if (thinking) finishReasoning(assistantEl);
 
+    const finalResponse = full || emptyResponseText(usage, finishReason);
     if (jsonMode) {
-      renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
+      renderJsonEnvelope(assistantEl, thinkingText, finalResponse, responseDate, usage);
     } else {
-      setBubbleText(assistantEl, full || '(пустой ответ)');
+      setBubbleText(assistantEl, finalResponse);
     }
     history.push({ role: 'assistant', content: full });
 
@@ -278,7 +289,7 @@ async function sendMessage(text) {
         completion_tokens: usage.completion_tokens
       };
       renderTotal();
-      if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
+      if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, finalResponse, responseDate, usage);
     }
   } catch (err) {
     setBubbleText(assistantEl, `Ошибка: ${err.message}`);
