@@ -5,7 +5,7 @@
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node --env-file=.env server.js"
+    "start": "start http://localhost:3000 & node --env-file=.env server.js"
   },
   "license": "MIT"
 }
