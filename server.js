@@ -9,6 +9,7 @@ const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODELS_URL = 'https://api.deepseek.com/models';
 const DEFAULT_MODEL = 'deepseek-chat';
 const MODEL_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
+const MIN_TOP_P = 0.01;
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -71,7 +72,7 @@ function sanitizeSettings(body) {
     out.temperature = body.temperature;
   }
   if (typeof body.top_p === 'number' && Number.isFinite(body.top_p) && body.top_p >= 0 && body.top_p <= 1) {
-    out.top_p = body.top_p;
+    out.top_p = Math.max(body.top_p, MIN_TOP_P);
   }
   if (Number.isInteger(body.max_tokens) && body.max_tokens > 0) {
     out.max_tokens = body.max_tokens;
