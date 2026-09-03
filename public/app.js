@@ -4,12 +4,22 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const tokensTotalEl = document.getElementById('tokens-total');
 const modelSelect = document.getElementById('model-select');
+const tempRange = document.getElementById('setting-temperature');
+const tempValue = document.getElementById('temperature-value');
+const topPRange = document.getElementById('setting-top-p');
+const topPValue = document.getElementById('top-p-value');
+const maxTokensInput = document.getElementById('setting-max-tokens');
+const stopInput = document.getElementById('setting-stop');
+const modeToggle = document.getElementById('setting-mode');
+const modeState = document.getElementById('mode-state');
 
 const history = [];
 
 const FALLBACK_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
 
 const MESSAGE_OVERHEAD_TOKENS = 4;
+
+const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в формате JSON.';
 
 let tokensBurned = 0;
 let prevUsage = null;
@@ -20,6 +30,22 @@ function renderTotal() {
 
 function currentModel() {
   return modelSelect.value || FALLBACK_MODELS[0];
+}
+
+function collectSettings() {
+  const settings = {
+    temperature: Number(tempRange.value) / 100,
+    top_p: Number(topPRange.value) / 100
+  };
+  const maxTokens = parseInt(maxTokensInput.value, 10);
+  if (Number.isInteger(maxTokens) && maxTokens > 0) settings.max_tokens = maxTokens;
+  const stop = stopInput.value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (stop.length > 0) settings.stop = stop;
+  if (!modeToggle.checked) settings.response_format = { type: 'json_object' };
+  return settings;
 }
 
 function fillModelOptions(ids) {
@@ -154,6 +180,29 @@ function finishReasoning(el) {
   if (spinner) spinner.remove();
 }
 
+function renderJsonEnvelope(el, thinking, response, date, usage) {
+  el.classList.remove('message--empty');
+  const contentEl = el.querySelector('.message__content');
+  let pre = contentEl.querySelector('.message__json');
+  if (!pre) {
+    contentEl.textContent = '';
+    pre = document.createElement('pre');
+    pre.className = 'message__json';
+    contentEl.appendChild(pre);
+  }
+  pre.textContent = JSON.stringify(
+    {
+      thinking,
+      response,
+      date,
+      tokens: usage ? usage.completion_tokens : 0
+    },
+    null,
+    2
+  );
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 function userMessageTokens(usage) {
   const prevTotal = prevUsage ? prevUsage.prompt_tokens + prevUsage.completion_tokens : 0;
   return Math.max(0, usage.prompt_tokens - prevTotal - MESSAGE_OVERHEAD_TOKENS);
@@ -164,15 +213,26 @@ async function sendMessage(text) {
   const userEl = addMessage('user', text);
 
   const assistantEl = addMessage('assistant', '');
+  const jsonMode = !modeToggle.checked;
+  const responseDate = new Date().toISOString();
   let full = '';
+  let thinkingText = '';
   let thinking = false;
   let usage = null;
 
   try {
+    const outgoingMessages = jsonMode
+      ? [{ role: 'system', content: JSON_SYSTEM_PROMPT }, ...history]
+      : history;
+
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: history, model: currentModel() })
+      body: JSON.stringify({
+        messages: outgoingMessages,
+        model: currentModel(),
+        ...collectSettings()
+      })
     });
 
     if (!res.ok || !res.body) {
@@ -185,7 +245,9 @@ async function sendMessage(text) {
       const delta = chunk.choices?.[0]?.delta;
       if (delta?.reasoning_content) {
         thinking = true;
+        thinkingText += delta.reasoning_content;
         appendReasoning(assistantEl, delta.reasoning_content);
+        if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
       }
       if (delta?.content) {
         if (thinking) {
@@ -193,13 +255,18 @@ async function sendMessage(text) {
           finishReasoning(assistantEl);
         }
         full += delta.content;
-        setBubbleText(assistantEl, full);
+        if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
+        else setBubbleText(assistantEl, full);
       }
     }
 
     if (thinking) finishReasoning(assistantEl);
 
-    setBubbleText(assistantEl, full || '(пустой ответ)');
+    if (jsonMode) {
+      renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
+    } else {
+      setBubbleText(assistantEl, full || '(пустой ответ)');
+    }
     history.push({ role: 'assistant', content: full });
 
     if (usage) {
@@ -211,6 +278,7 @@ async function sendMessage(text) {
         completion_tokens: usage.completion_tokens
       };
       renderTotal();
+      if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
     }
   } catch (err) {
     setBubbleText(assistantEl, `Ошибка: ${err.message}`);
@@ -259,3 +327,15 @@ autoResize();
 renderTotal();
 loadModels();
 ensureWelcome();
+
+tempRange.addEventListener('input', () => {
+  tempValue.textContent = `${tempRange.value}%`;
+});
+
+topPRange.addEventListener('input', () => {
+  topPValue.textContent = `${topPRange.value}%`;
+});
+
+modeToggle.addEventListener('change', () => {
+  modeState.textContent = modeToggle.checked ? 'Обычный' : 'JSON';
+});

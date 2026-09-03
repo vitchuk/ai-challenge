@@ -31,7 +31,76 @@
     <aside class="settings">
       <div class="settings__title">Помогатор2К</div>
       <div class="settings__divider"></div>
-      <div class="settings__placeholder">Настройки появятся здесь</div>
+
+      <div class="settings__form">
+        <div class="settings__field">
+          <label class="settings__label" for="setting-temperature">
+            Четкость ответа
+            <span class="settings__value" id="temperature-value">100%</span>
+          </label>
+          <input
+            type="range"
+            id="setting-temperature"
+            class="settings__range"
+            min="0"
+            max="100"
+            step="1"
+            value="100"
+          />
+          <p class="settings__hint">0 - четкий ответ, 100 - не предсказуемый ответ</p>
+        </div>
+
+        <div class="settings__field">
+          <label class="settings__label" for="setting-top-p">
+            Разнообразие ответов
+            <span class="settings__value" id="top-p-value">100%</span>
+          </label>
+          <input
+            type="range"
+            id="setting-top-p"
+            class="settings__range"
+            min="0"
+            max="100"
+            step="1"
+            value="100"
+          />
+          <p class="settings__hint">0 - всегда одинаковый ответ, 100 - максимально разнообразный ответ</p>
+        </div>
+
+        <div class="settings__field">
+          <label class="settings__label" for="setting-max-tokens">Лимит токенов</label>
+          <input
+            type="number"
+            id="setting-max-tokens"
+            class="settings__input"
+            min="1"
+            step="1"
+            placeholder="Не задано"
+          />
+        </div>
+
+        <div class="settings__field">
+          <label class="settings__label" for="setting-stop">Стоп слова</label>
+          <input
+            type="text"
+            id="setting-stop"
+            class="settings__input"
+            placeholder="Не задано"
+          />
+        </div>
+
+        <div class="settings__field">
+          <span class="settings__label">Режим ответа</span>
+          <div class="settings__switch-row">
+            <label class="settings__switch">
+              <input type="checkbox" id="setting-mode" checked />
+              <span class="settings__switch-slider"></span>
+            </label>
+            <span class="settings__mode-state" id="mode-state">Обычный</span>
+          </div>
+          <p class="settings__hint">вкл — обычный ответ, выкл — строгий JSON</p>
+        </div>
+      </div>
     </aside>
   </div>
 

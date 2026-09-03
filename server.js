@@ -65,6 +65,34 @@ async function readBody(req) {
   });
 }
 
+function sanitizeSettings(body) {
+  const out = {};
+  if (typeof body.temperature === 'number' && Number.isFinite(body.temperature) && body.temperature >= 0 && body.temperature <= 1) {
+    out.temperature = body.temperature;
+  }
+  if (typeof body.top_p === 'number' && Number.isFinite(body.top_p) && body.top_p >= 0 && body.top_p <= 1) {
+    out.top_p = body.top_p;
+  }
+  if (Number.isInteger(body.max_tokens) && body.max_tokens > 0) {
+    out.max_tokens = body.max_tokens;
+  }
+  if (Array.isArray(body.stop)) {
+    const stop = body.stop
+      .filter((s) => typeof s === 'string' && s.trim())
+      .slice(0, 16);
+    if (stop.length > 0) out.stop = stop;
+  }
+  if (
+    body.response_format &&
+    typeof body.response_format === 'object' &&
+    typeof body.response_format.type === 'string' &&
+    body.response_format.type
+  ) {
+    out.response_format = { type: body.response_format.type };
+  }
+  return out;
+}
+
 async function handleChat(req, res) {
   if (!DEEPSEEK_API_KEY) {
     sendJson(res, 500, { error: 'DEEPSEEK_API_KEY is not set on the server' });
@@ -98,7 +126,8 @@ async function handleChat(req, res) {
       model,
       messages,
       stream: true,
-      stream_options: { include_usage: true }
+      stream_options: { include_usage: true },
+      ...sanitizeSettings(body)
     })
   });
 
