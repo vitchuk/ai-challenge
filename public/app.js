@@ -50,10 +50,14 @@ function collectSettings() {
 }
 
 function resetGenerationDefaults() {
-  tempRange.value = '100';
-  tempValue.textContent = '100%';
-  topPRange.value = '100';
-  topPValue.textContent = '100%';
+  if (tempRange) {
+    tempRange.value = '100';
+    tempValue.textContent = '100%';
+  }
+  if (topPRange) {
+    topPRange.value = '100';
+    topPValue.textContent = '100%';
+  }
   tempTouched = false;
   topPTouched = false;
 }
@@ -349,15 +353,19 @@ renderTotal();
 loadModels();
 ensureWelcome();
 
-tempRange.addEventListener('input', () => {
-  tempTouched = true;
-  tempValue.textContent = `${tempRange.value}%`;
-});
+if (tempRange) {
+  tempRange.addEventListener('input', () => {
+    tempTouched = true;
+    tempValue.textContent = `${tempRange.value}%`;
+  });
+}
 
-topPRange.addEventListener('input', () => {
-  topPTouched = true;
-  topPValue.textContent = `${topPRange.value}%`;
-});
+if (topPRange) {
+  topPRange.addEventListener('input', () => {
+    topPTouched = true;
+    topPValue.textContent = `${topPRange.value}%`;
+  });
+}
 
 modelSelect.addEventListener('change', resetGenerationDefaults);
 
