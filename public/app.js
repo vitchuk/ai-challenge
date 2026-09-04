@@ -23,6 +23,8 @@ const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в форма
 
 let tokensBurned = 0;
 let prevUsage = null;
+let tempTouched = false;
+let topPTouched = false;
 
 function renderTotal() {
   tokensTotalEl.textContent = String(tokensBurned);
@@ -33,10 +35,9 @@ function currentModel() {
 }
 
 function collectSettings() {
-  const settings = {
-    temperature: Number(tempRange.value) / 100,
-    top_p: Number(topPRange.value) / 100
-  };
+  const settings = {};
+  if (tempTouched) settings.temperature = Number(tempRange.value) / 100;
+  if (topPTouched) settings.top_p = Number(topPRange.value) / 100;
   const maxTokens = parseInt(maxTokensInput.value, 10);
   if (Number.isInteger(maxTokens) && maxTokens > 0) settings.max_tokens = maxTokens;
   const stop = stopInput.value
@@ -46,6 +47,15 @@ function collectSettings() {
   if (stop.length > 0) settings.stop = stop;
   if (!modeToggle.checked) settings.response_format = { type: 'json_object' };
   return settings;
+}
+
+function resetGenerationDefaults() {
+  tempRange.value = '100';
+  tempValue.textContent = '100%';
+  topPRange.value = '100';
+  topPValue.textContent = '100%';
+  tempTouched = false;
+  topPTouched = false;
 }
 
 function fillModelOptions(ids) {
@@ -340,12 +350,16 @@ loadModels();
 ensureWelcome();
 
 tempRange.addEventListener('input', () => {
+  tempTouched = true;
   tempValue.textContent = `${tempRange.value}%`;
 });
 
 topPRange.addEventListener('input', () => {
+  topPTouched = true;
   topPValue.textContent = `${topPRange.value}%`;
 });
+
+modelSelect.addEventListener('change', resetGenerationDefaults);
 
 modeToggle.addEventListener('change', () => {
   modeState.textContent = modeToggle.checked ? 'Обычный' : 'JSON';
