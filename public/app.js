@@ -22,19 +22,15 @@ const MESSAGE_OVERHEAD_TOKENS = 4;
 
 const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в формате JSON.';
 
-const SUMMARY_CHAT_TITLE = 'Итоги всех чатов';
+const SUMMARY_CHAT_TITLE = 'Подвести итоги';
 
-const SUMMARY_INSTRUCTION =
-  'Ниже — диалоги из нескольких чатов. Сравни ответы ассистента в разных чатах: ' +
-  'оцени точность, полноту и качество каждого, укажи, какой ответ наилучший и почему. ' +
-  'Ответь структурированно по чатам.';
+const SUMMARY_CONTEXT_PROMPT =
+  'У тебя есть доступ к содержимому всех открытых чатов. Используй его при ответе на вопрос пользователя.';
 
 const chats = [];
 let activeChatId = null;
 let chatCounter = 0;
 let tokensBurned = 0;
-let tempTouched = false;
-let topPTouched = false;
 
 function renderTotal() {
   tokensTotalEl.textContent = String(tokensBurned);
@@ -46,8 +42,10 @@ function currentModel() {
 
 function collectSettings() {
   const settings = {};
-  if (tempTouched) settings.temperature = Number(tempRange.value) / 100;
-  if (topPTouched) settings.top_p = Number(topPRange.value) / 100;
+  settings.temperature = Number(tempRange.value);
+  let topP = Number(topPRange.value);
+  if (topP === 0) topP = 0.01;
+  settings.top_p = topP;
   const maxTokens = parseInt(maxTokensInput.value, 10);
   if (Number.isInteger(maxTokens) && maxTokens > 0) settings.max_tokens = maxTokens;
   const stop = stopInput.value
@@ -61,15 +59,13 @@ function collectSettings() {
 
 function resetGenerationDefaults() {
   if (tempRange) {
-    tempRange.value = '100';
-    tempValue.textContent = '100%';
+    tempRange.value = '1';
+    tempValue.textContent = '1';
   }
   if (topPRange) {
-    topPRange.value = '100';
-    topPValue.textContent = '100%';
+    topPRange.value = '1';
+    topPValue.textContent = '1';
   }
-  tempTouched = false;
-  topPTouched = false;
 }
 
 function fillModelOptions(ids) {
@@ -337,9 +333,19 @@ async function streamAssistant(chat, userEl) {
   let finishReason = null;
 
   try {
-    const outgoingMessages = jsonMode
-      ? [{ role: 'system', content: JSON_SYSTEM_PROMPT }, ...chat.history]
-      : chat.history;
+    let outgoingMessages = [...chat.history];
+    if (chat.isSummary) {
+      const context = buildGlobalContext();
+      outgoingMessages.unshift({
+        role: 'system',
+        content: context
+          ? `${SUMMARY_CONTEXT_PROMPT}\n\n${context}`
+          : 'Открытые чаты пусты. Отвечай на вопрос пользователя без дополнительного контекста.'
+      });
+    }
+    if (jsonMode) {
+      outgoingMessages.unshift({ role: 'system', content: JSON_SYSTEM_PROMPT });
+    }
 
     const res = await fetch('/api/chat', {
       method: 'POST',
@@ -444,70 +450,31 @@ function createSummaryChat() {
   chat.messagesEl = messagesEl;
 
   chats.push(chat);
+  addMessage(chat, 'assistant', 'Задайте вопрос с контекстом всех открытых чатов');
   return chat;
 }
 
-function clearChat(chat) {
-  chat.history = [];
-  chat.prevUsage = null;
-  chat.messagesEl.innerHTML = '';
-}
-
-function collectSummaryData() {
+function buildGlobalContext() {
   const parts = [];
   for (const chat of chats) {
     if (chat.isSummary) continue;
-    const pairs = [];
-    for (let i = 0; i < chat.history.length; i++) {
-      const m = chat.history[i];
-      if (m.role !== 'user') continue;
-      const next = chat.history[i + 1];
-      if (next && next.role === 'assistant' && next.content) {
-        pairs.push({ question: m.content, answer: next.content });
-      }
+    if (chat.history.length === 0) continue;
+    const lines = [`### Чат «${chat.title}»`];
+    for (const m of chat.history) {
+      const label = m.role === 'user' ? 'Пользователь' : 'Ассистент';
+      lines.push(`${label}: ${m.content}`);
     }
-    if (pairs.length > 0) {
-      parts.push({ title: chat.title, pairs });
-    }
+    parts.push(lines.join('\n'));
   }
-  return parts;
+  return parts.join('\n\n');
 }
 
-function buildSummaryPrompt(parts) {
-  const lines = [SUMMARY_INSTRUCTION, ''];
-  for (const part of parts) {
-    lines.push(`### Чат «${part.title}»`);
-    for (const pair of part.pairs) {
-      lines.push(`Вопрос: ${pair.question}`);
-      lines.push(`Ответ ассистента: ${pair.answer}`);
-      lines.push('');
-    }
-  }
-  return lines.join('\n');
-}
-
-async function generateSummary() {
-  const parts = collectSummaryData();
-
+function openSummaryChat() {
   let chat = findSummaryChat();
-  if (chat) {
-    if (chat.busy) return;
-    clearChat(chat);
-  } else {
+  if (!chat) {
     chat = createSummaryChat();
   }
   activateChat(chat);
-
-  if (parts.length === 0) {
-    addMessage(chat, 'assistant', 'Пока нечего сравнивать: ни в одном чате нет ответов ассистента.');
-    return;
-  }
-
-  const instruction = buildSummaryPrompt(parts);
-  chat.history.push({ role: 'user', content: instruction });
-  const userEl = addMessage(chat, 'user', instruction);
-
-  await streamAssistant(chat, userEl);
 }
 
 function autoResize() {
@@ -552,7 +519,7 @@ newChatBtn.addEventListener('click', () => {
   activateChat(chat);
 });
 
-summarizeBtn.addEventListener('click', generateSummary);
+summarizeBtn.addEventListener('click', openSummaryChat);
 
 tabsListEl.addEventListener('click', (e) => {
   const item = e.target.closest('.tabs__item');
@@ -568,15 +535,13 @@ tabsListEl.addEventListener('click', (e) => {
 
 if (tempRange) {
   tempRange.addEventListener('input', () => {
-    tempTouched = true;
-    tempValue.textContent = `${tempRange.value}%`;
+    tempValue.textContent = tempRange.value;
   });
 }
 
 if (topPRange) {
   topPRange.addEventListener('input', () => {
-    topPTouched = true;
-    topPValue.textContent = `${topPRange.value}%`;
+    topPValue.textContent = topPRange.value;
   });
 }
 

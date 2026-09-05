@@ -12,7 +12,7 @@
       <ul id="tabs-list" class="tabs__list"></ul>
       <div class="tabs__actions">
         <button id="new-chat" class="tabs__new" type="button" title="Новый чат">+</button>
-        <button id="summarize" class="tabs__summarize" type="button" title="Подвести итоги всех чатов">Подвести Итоги</button>
+        <button id="summarize" class="tabs__summarize" type="button" title="Подвести итоги всех чатов">Подвести итоги</button>
       </div>
     </aside>
 
@@ -39,6 +39,38 @@
       </div>
 
       <div class="settings__form">
+        <div class="settings__field">
+          <label class="settings__label" for="setting-temperature">
+            Температура
+            <span class="settings__value" id="temperature-value">1</span>
+          </label>
+          <input
+            type="range"
+            id="setting-temperature"
+            class="settings__range"
+            min="0"
+            max="2"
+            step="0.1"
+            value="1"
+          />
+        </div>
+
+        <div class="settings__field">
+          <label class="settings__label" for="setting-top-p">
+            top_p
+            <span class="settings__value" id="top-p-value">1</span>
+          </label>
+          <input
+            type="range"
+            id="setting-top-p"
+            class="settings__range"
+            min="0"
+            max="1"
+            step="0.01"
+            value="1"
+          />
+        </div>
+
         <div class="settings__field">
           <label class="settings__label" for="setting-max-tokens">Лимит токенов</label>
           <input
