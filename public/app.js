@@ -1,4 +1,4 @@
-const messagesEl = document.getElementById('messages');
+const messagesRoot = document.getElementById('messages');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
@@ -12,8 +12,9 @@ const maxTokensInput = document.getElementById('setting-max-tokens');
 const stopInput = document.getElementById('setting-stop');
 const modeToggle = document.getElementById('setting-mode');
 const modeState = document.getElementById('mode-state');
-
-const history = [];
+const newChatBtn = document.getElementById('new-chat');
+const summarizeBtn = document.getElementById('summarize');
+const tabsListEl = document.getElementById('tabs-list');
 
 const FALLBACK_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
 
@@ -21,8 +22,17 @@ const MESSAGE_OVERHEAD_TOKENS = 4;
 
 const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в формате JSON.';
 
+const SUMMARY_CHAT_TITLE = 'Итоги всех чатов';
+
+const SUMMARY_INSTRUCTION =
+  'Ниже — диалоги из нескольких чатов. Сравни ответы ассистента в разных чатах: ' +
+  'оцени точность, полноту и качество каждого, укажи, какой ответ наилучший и почему. ' +
+  'Ответь структурированно по чатам.';
+
+const chats = [];
+let activeChatId = null;
+let chatCounter = 0;
 let tokensBurned = 0;
-let prevUsage = null;
 let tempTouched = false;
 let topPTouched = false;
 
@@ -89,7 +99,94 @@ async function loadModels() {
   }
 }
 
-function addMessage(role, text) {
+function getActiveChat() {
+  return chats.find((c) => c.id === activeChatId) || null;
+}
+
+function updateSendButton() {
+  const chat = getActiveChat();
+  sendBtn.disabled = Boolean(chat && chat.busy);
+}
+
+function createChat() {
+  const chat = {
+    id: `chat-${++chatCounter}`,
+    title: 'Новый чат',
+    history: [],
+    prevUsage: null,
+    renamed: false,
+    isSummary: false,
+    busy: false,
+    messagesEl: null
+  };
+
+  const messagesEl = document.createElement('div');
+  messagesEl.className = 'chat__messages';
+  messagesEl.hidden = true;
+  messagesRoot.appendChild(messagesEl);
+  chat.messagesEl = messagesEl;
+
+  chats.push(chat);
+  addMessage(chat, 'assistant', 'Привет! Чем могу помочь?');
+  return chat;
+}
+
+function renderTabs() {
+  tabsListEl.innerHTML = '';
+  for (const chat of chats) {
+    const li = document.createElement('li');
+    li.className = 'tabs__item';
+    if (chat.id === activeChatId) li.classList.add('tabs__item--active');
+    li.dataset.id = chat.id;
+
+    const title = document.createElement('span');
+    title.className = 'tabs__title';
+    title.textContent = chat.title;
+    title.title = chat.title;
+
+    const close = document.createElement('button');
+    close.className = 'tabs__close';
+    close.type = 'button';
+    close.textContent = '×';
+    close.title = 'Закрыть чат';
+
+    li.appendChild(title);
+    li.appendChild(close);
+    tabsListEl.appendChild(li);
+  }
+}
+
+function activateChat(chat) {
+  activeChatId = chat.id;
+  for (const c of chats) {
+    c.messagesEl.hidden = c.id !== chat.id;
+  }
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+  renderTabs();
+  updateSendButton();
+}
+
+function closeChat(chat) {
+  if (!confirm(`Закрыть чат «${chat.title}»? История будет удалена.`)) return;
+
+  const idx = chats.indexOf(chat);
+  chat.messagesEl.remove();
+  chats.splice(idx, 1);
+
+  if (chats.length === 0) {
+    const fresh = createChat();
+    activateChat(fresh);
+    return;
+  }
+
+  if (chat.id === activeChatId) {
+    activateChat(chats[idx - 1] || chats[idx]);
+  } else {
+    renderTabs();
+  }
+}
+
+function addMessage(chat, role, text) {
   const el = document.createElement('div');
   el.classList.add('message', `message--${role}`);
   if (!text) el.classList.add('message--empty');
@@ -97,15 +194,9 @@ function addMessage(role, text) {
   content.className = 'message__content';
   content.textContent = text || '...';
   el.appendChild(content);
-  messagesEl.appendChild(el);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  chat.messagesEl.appendChild(el);
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
   return el;
-}
-
-function ensureWelcome() {
-  if (messagesEl.children.length === 0) {
-    addMessage('assistant', 'Привет! Чем могу помочь?');
-  }
 }
 
 async function* parseSSE(response) {
@@ -135,10 +226,10 @@ async function* parseSSE(response) {
   }
 }
 
-function setBubbleText(el, text) {
+function setBubbleText(chat, el, text) {
   el.classList.remove('message--empty');
   el.querySelector('.message__content').textContent = text;
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
 }
 
 function setBubbleTokens(el, n) {
@@ -181,10 +272,10 @@ function createReasoning(el) {
   return node;
 }
 
-function appendReasoning(el, text) {
+function appendReasoning(chat, el, text) {
   const node = createReasoning(el);
   node.querySelector('.message__reasoning-body').textContent += text;
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
 }
 
 function finishReasoning(el) {
@@ -194,7 +285,7 @@ function finishReasoning(el) {
   if (spinner) spinner.remove();
 }
 
-function renderJsonEnvelope(el, thinking, response, date, usage) {
+function renderJsonEnvelope(chat, el, thinking, response, date, usage) {
   el.classList.remove('message--empty');
   const contentEl = el.querySelector('.message__content');
   let pre = contentEl.querySelector('.message__json');
@@ -214,7 +305,7 @@ function renderJsonEnvelope(el, thinking, response, date, usage) {
     null,
     2
   );
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
 }
 
 function emptyResponseText(usage, finishReason) {
@@ -225,16 +316,18 @@ function emptyResponseText(usage, finishReason) {
   return '(пустой ответ)';
 }
 
-function userMessageTokens(usage) {
-  const prevTotal = prevUsage ? prevUsage.prompt_tokens + prevUsage.completion_tokens : 0;
+function userMessageTokens(chat, usage) {
+  const prevTotal = chat.prevUsage
+    ? chat.prevUsage.prompt_tokens + chat.prevUsage.completion_tokens
+    : 0;
   return Math.max(0, usage.prompt_tokens - prevTotal - MESSAGE_OVERHEAD_TOKENS);
 }
 
-async function sendMessage(text) {
-  history.push({ role: 'user', content: text });
-  const userEl = addMessage('user', text);
+async function streamAssistant(chat, userEl) {
+  chat.busy = true;
+  updateSendButton();
 
-  const assistantEl = addMessage('assistant', '');
+  const assistantEl = addMessage(chat, 'assistant', '');
   const jsonMode = !modeToggle.checked;
   const responseDate = new Date().toISOString();
   let full = '';
@@ -245,8 +338,8 @@ async function sendMessage(text) {
 
   try {
     const outgoingMessages = jsonMode
-      ? [{ role: 'system', content: JSON_SYSTEM_PROMPT }, ...history]
-      : history;
+      ? [{ role: 'system', content: JSON_SYSTEM_PROMPT }, ...chat.history]
+      : chat.history;
 
     const res = await fetch('/api/chat', {
       method: 'POST',
@@ -270,8 +363,8 @@ async function sendMessage(text) {
       if (delta?.reasoning_content) {
         thinking = true;
         thinkingText += delta.reasoning_content;
-        appendReasoning(assistantEl, delta.reasoning_content);
-        if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
+        appendReasoning(chat, assistantEl, delta.reasoning_content);
+        if (jsonMode) renderJsonEnvelope(chat, assistantEl, thinkingText, full, responseDate, usage);
       }
       if (delta?.content) {
         if (thinking) {
@@ -279,8 +372,8 @@ async function sendMessage(text) {
           finishReasoning(assistantEl);
         }
         full += delta.content;
-        if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, full, responseDate, usage);
-        else setBubbleText(assistantEl, full);
+        if (jsonMode) renderJsonEnvelope(chat, assistantEl, thinkingText, full, responseDate, usage);
+        else setBubbleText(chat, assistantEl, full);
       }
     }
 
@@ -288,28 +381,133 @@ async function sendMessage(text) {
 
     const finalResponse = full || emptyResponseText(usage, finishReason);
     if (jsonMode) {
-      renderJsonEnvelope(assistantEl, thinkingText, finalResponse, responseDate, usage);
+      renderJsonEnvelope(chat, assistantEl, thinkingText, finalResponse, responseDate, usage);
     } else {
-      setBubbleText(assistantEl, finalResponse);
+      setBubbleText(chat, assistantEl, finalResponse);
     }
-    history.push({ role: 'assistant', content: full });
+    chat.history.push({ role: 'assistant', content: full });
 
     if (usage) {
-      setBubbleTokens(userEl, userMessageTokens(usage));
+      if (userEl) setBubbleTokens(userEl, userMessageTokens(chat, usage));
       setBubbleTokens(assistantEl, usage.completion_tokens);
       tokensBurned += usage.total_tokens;
-      prevUsage = {
+      chat.prevUsage = {
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens
       };
       renderTotal();
-      if (jsonMode) renderJsonEnvelope(assistantEl, thinkingText, finalResponse, responseDate, usage);
+      if (jsonMode) renderJsonEnvelope(chat, assistantEl, thinkingText, finalResponse, responseDate, usage);
     }
   } catch (err) {
-    setBubbleText(assistantEl, `Ошибка: ${err.message}`);
+    setBubbleText(chat, assistantEl, `Ошибка: ${err.message}`);
     assistantEl.classList.add('message--error');
-    if (history[history.length - 1].role === 'user') history.pop();
+    if (chat.history[chat.history.length - 1].role === 'user') chat.history.pop();
+  } finally {
+    chat.busy = false;
+    updateSendButton();
   }
+}
+
+async function sendMessage(chat, text) {
+  chat.history.push({ role: 'user', content: text });
+  const userEl = addMessage(chat, 'user', text);
+
+  if (!chat.renamed) {
+    chat.renamed = true;
+    chat.title = text.replace(/\s+/g, ' ').trim() || 'Новый чат';
+    renderTabs();
+  }
+
+  await streamAssistant(chat, userEl);
+}
+
+function findSummaryChat() {
+  return chats.find((c) => c.isSummary) || null;
+}
+
+function createSummaryChat() {
+  const chat = {
+    id: `chat-${++chatCounter}`,
+    title: SUMMARY_CHAT_TITLE,
+    history: [],
+    prevUsage: null,
+    renamed: true,
+    isSummary: true,
+    busy: false,
+    messagesEl: null
+  };
+
+  const messagesEl = document.createElement('div');
+  messagesEl.className = 'chat__messages';
+  messagesEl.hidden = true;
+  messagesRoot.appendChild(messagesEl);
+  chat.messagesEl = messagesEl;
+
+  chats.push(chat);
+  return chat;
+}
+
+function clearChat(chat) {
+  chat.history = [];
+  chat.prevUsage = null;
+  chat.messagesEl.innerHTML = '';
+}
+
+function collectSummaryData() {
+  const parts = [];
+  for (const chat of chats) {
+    if (chat.isSummary) continue;
+    const pairs = [];
+    for (let i = 0; i < chat.history.length; i++) {
+      const m = chat.history[i];
+      if (m.role !== 'user') continue;
+      const next = chat.history[i + 1];
+      if (next && next.role === 'assistant' && next.content) {
+        pairs.push({ question: m.content, answer: next.content });
+      }
+    }
+    if (pairs.length > 0) {
+      parts.push({ title: chat.title, pairs });
+    }
+  }
+  return parts;
+}
+
+function buildSummaryPrompt(parts) {
+  const lines = [SUMMARY_INSTRUCTION, ''];
+  for (const part of parts) {
+    lines.push(`### Чат «${part.title}»`);
+    for (const pair of part.pairs) {
+      lines.push(`Вопрос: ${pair.question}`);
+      lines.push(`Ответ ассистента: ${pair.answer}`);
+      lines.push('');
+    }
+  }
+  return lines.join('\n');
+}
+
+async function generateSummary() {
+  const parts = collectSummaryData();
+
+  let chat = findSummaryChat();
+  if (chat) {
+    if (chat.busy) return;
+    clearChat(chat);
+  } else {
+    chat = createSummaryChat();
+  }
+  activateChat(chat);
+
+  if (parts.length === 0) {
+    addMessage(chat, 'assistant', 'Пока нечего сравнивать: ни в одном чате нет ответов ассистента.');
+    return;
+  }
+
+  const instruction = buildSummaryPrompt(parts);
+  chat.history.push({ role: 'user', content: instruction });
+  const userEl = addMessage(chat, 'user', instruction);
+
+  await streamAssistant(chat, userEl);
 }
 
 function autoResize() {
@@ -328,16 +526,16 @@ function autoResize() {
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text || sendBtn.disabled) return;
+  if (!text) return;
 
-  sendBtn.disabled = true;
+  const chat = getActiveChat();
+  if (!chat || chat.busy) return;
+
   input.value = '';
   autoResize();
-
-  await sendMessage(text);
-
-  sendBtn.disabled = false;
   input.focus();
+
+  await sendMessage(chat, text);
 });
 
 input.addEventListener('keydown', (e) => {
@@ -348,10 +546,25 @@ input.addEventListener('keydown', (e) => {
 });
 
 input.addEventListener('input', autoResize);
-autoResize();
-renderTotal();
-loadModels();
-ensureWelcome();
+
+newChatBtn.addEventListener('click', () => {
+  const chat = createChat();
+  activateChat(chat);
+});
+
+summarizeBtn.addEventListener('click', generateSummary);
+
+tabsListEl.addEventListener('click', (e) => {
+  const item = e.target.closest('.tabs__item');
+  if (!item) return;
+  const chat = chats.find((c) => c.id === item.dataset.id);
+  if (!chat) return;
+  if (e.target.closest('.tabs__close')) {
+    closeChat(chat);
+  } else {
+    activateChat(chat);
+  }
+});
 
 if (tempRange) {
   tempRange.addEventListener('input', () => {
@@ -372,3 +585,9 @@ modelSelect.addEventListener('change', resetGenerationDefaults);
 modeToggle.addEventListener('change', () => {
   modeState.textContent = modeToggle.checked ? 'Обычный' : 'JSON';
 });
+
+autoResize();
+renderTotal();
+loadModels();
+const initialChat = createChat();
+activateChat(initialChat);

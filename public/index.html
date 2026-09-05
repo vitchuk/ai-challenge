@@ -8,14 +8,16 @@
 </head>
 <body>
   <div class="app">
-    <div class="chat">
-      <header class="chat__header">
-        <select id="model-select" class="chat__model" aria-label="Модель">
-          <option value="deepseek-chat">deepseek-chat</option>
-        </select>
-      </header>
+    <aside class="tabs">
+      <ul id="tabs-list" class="tabs__list"></ul>
+      <div class="tabs__actions">
+        <button id="new-chat" class="tabs__new" type="button" title="Новый чат">+</button>
+        <button id="summarize" class="tabs__summarize" type="button" title="Подвести итоги всех чатов">Подвести Итоги</button>
+      </div>
+    </aside>
 
-      <main id="messages" class="chat__messages"></main>
+    <div class="chat">
+      <main id="messages" class="chat__body"></main>
 
       <form id="form" class="chat__form">
         <textarea
@@ -29,8 +31,12 @@
     </div>
 
     <aside class="settings">
-      <div class="settings__title">Помогатор2К</div>
-      <div class="settings__divider"></div>
+      <div class="settings__brand">
+        <div class="settings__title">Помогатор2К</div>
+        <select id="model-select" class="settings__select" aria-label="Модель">
+          <option value="deepseek-chat">deepseek-chat</option>
+        </select>
+      </div>
 
       <div class="settings__form">
         <div class="settings__field">
