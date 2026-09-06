@@ -33,9 +33,21 @@
     <aside class="settings">
       <div class="settings__brand">
         <div class="settings__title">Помогатор2К</div>
-        <select id="model-select" class="settings__select" aria-label="Модель">
-          <option value="deepseek-chat">deepseek-chat</option>
-        </select>
+        <div class="dropdown" id="model-dropdown">
+          <button
+            type="button"
+            class="dropdown__button"
+            id="model-button"
+            aria-haspopup="listbox"
+            aria-expanded="false"
+            aria-label="Модель"
+          >
+            <span class="dropdown__dot" id="model-dot"></span>
+            <span class="dropdown__label" id="model-label">deepseek-v4-flash</span>
+            <span class="dropdown__chevron"></span>
+          </button>
+          <div class="dropdown__menu" id="model-menu" role="listbox" hidden></div>
+        </div>
       </div>
 
       <div class="settings__form">

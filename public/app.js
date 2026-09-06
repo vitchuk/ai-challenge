@@ -3,7 +3,11 @@ const form = document.getElementById('form');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const tokensTotalEl = document.getElementById('tokens-total');
-const modelSelect = document.getElementById('model-select');
+const modelDropdown = document.getElementById('model-dropdown');
+const modelButton = document.getElementById('model-button');
+const modelDot = document.getElementById('model-dot');
+const modelLabel = document.getElementById('model-label');
+const modelMenu = document.getElementById('model-menu');
 const tempRange = document.getElementById('setting-temperature');
 const tempValue = document.getElementById('temperature-value');
 const topPRange = document.getElementById('setting-top-p');
@@ -16,9 +20,40 @@ const newChatBtn = document.getElementById('new-chat');
 const summarizeBtn = document.getElementById('summarize');
 const tabsListEl = document.getElementById('tabs-list');
 
-const FALLBACK_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
+const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
-const MESSAGE_OVERHEAD_TOKENS = 4;
+const TIER_CHEAP_MAX = 1;
+const TIER_MEDIUM_MAX = 4;
+
+const MODEL_PRICES = {
+  'deepseek-v4-flash': { in: 0.22, out: 0.66 },
+  'deepseek-v4-flash-vision-exp': { in: 0.22, out: 0.66 },
+  'deepseek-v4-pro': { in: 0.66, out: 1.98 },
+  'deepseek-chat': { in: 0.22, out: 0.66 },
+  'deepseek-reasoner': { in: 0.22, out: 0.66 },
+  'opencode/glm-5.3-flash': { in: 0.15, out: 0.5 },
+  'opencode/glm-5.3': { in: 1.4, out: 4.4 },
+  'opencode/glm-5.2': { in: 1.4, out: 4.4 },
+  'opencode/glm-5.1': { in: 1.4, out: 4.4 },
+  'opencode/kimi-k3': { in: 3, out: 15 },
+  'opencode/kimi-k2.7-code': { in: 0.95, out: 4 },
+  'opencode/kimi-k2.6': { in: 0.95, out: 4 },
+  'opencode/longcat-2.0': { in: 0.3, out: 1.2 },
+  'opencode/deepseek-v4-pro': { in: 0.66, out: 1.98 },
+  'opencode/deepseek-v4-flash': { in: 0.22, out: 0.66 },
+  'opencode/deepseek-v4-flash-vision-exp': { in: 0.22, out: 0.66 },
+  'opencode/mimo-v2.5': { in: 0.14, out: 0.28 },
+  'opencode/mimo-v2.5-pro': { in: 0.435, out: 0.87 },
+  'opencode/hy4-preview': { in: 0.834, out: 2.501 },
+  'opencode/hy3': { in: 0.14, out: 0.58 },
+  'opencode/omen-alpha': { in: 0.2, out: 0.66 },
+  'opencode/big-pickle': { in: 0, out: 0 },
+  'opencode/deepseek-v4-flash-free': { in: 0, out: 0 },
+  'opencode/mimo-v2.5-free': { in: 0, out: 0 },
+  'opencode/ling-3.0-flash-fin-free': { in: 0, out: 0 },
+  'opencode/nemotron-3-ultra-free': { in: 0, out: 0 },
+  'opencode/nemotron-3.5-lightning-free': { in: 0, out: 0 }
+};
 
 const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в формате JSON.';
 
@@ -37,7 +72,7 @@ function renderTotal() {
 }
 
 function currentModel() {
-  return modelSelect.value || FALLBACK_MODELS[0];
+  return selectedModel || FALLBACK_MODELS[0];
 }
 
 function collectSettings() {
@@ -68,31 +103,161 @@ function resetGenerationDefaults() {
   }
 }
 
-function fillModelOptions(ids) {
-  const preferred = ids.includes(FALLBACK_MODELS[0]) ? FALLBACK_MODELS[0] : ids[0];
-  modelSelect.innerHTML = '';
-  for (const id of ids) {
-    const opt = document.createElement('option');
-    opt.value = id;
-    opt.textContent = id;
-    modelSelect.appendChild(opt);
-  }
-  modelSelect.value = preferred;
+let selectedModel = null;
+
+function displayName(id) {
+  return id.startsWith('opencode/') ? id.slice('opencode/'.length) : id;
 }
 
-async function loadModels() {
-  try {
-    const res = await fetch('/api/models');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const ids = (Array.isArray(data.data) ? data.data : [])
-      .map((m) => m && m.id)
-      .filter((id) => typeof id === 'string');
-    if (ids.length === 0) throw new Error('empty model list');
-    fillModelOptions(ids);
-  } catch {
-    fillModelOptions(FALLBACK_MODELS);
+function modelGroupLabel(ownedBy) {
+  if (ownedBy === 'deepseek') return 'DeepSeek';
+  if (ownedBy === 'opencode') return 'OpenCode Go';
+  return ownedBy || 'Другие';
+}
+
+function modelPrice(id) {
+  const p = MODEL_PRICES[id];
+  return p && typeof p.out === 'number' ? p.out : -1;
+}
+
+function messageCost(id, promptTokens, completionTokens) {
+  const p = MODEL_PRICES[id];
+  if (!p || typeof p.in !== 'number' || typeof p.out !== 'number') return null;
+  return (promptTokens * p.in + completionTokens * p.out) / 1e6;
+}
+
+function formatCost(cost) {
+  if (typeof cost !== 'number') return '–';
+  if (cost === 0) return '0';
+  let s = cost.toFixed(7).replace(/0+$/, '');
+  s = s.replace(/\.$/, '');
+  return s;
+}
+
+function priceTier(price) {
+  if (typeof price !== 'number') return null;
+  if (price <= TIER_CHEAP_MAX) return 'cheap';
+  if (price <= TIER_MEDIUM_MAX) return 'medium';
+  return 'expensive';
+}
+
+function priceLabel(price) {
+  if (typeof price !== 'number') return '';
+  if (price === 0) return 'free';
+  return `$${price.toFixed(2)}/1M`;
+}
+
+function setSelectedModel(id) {
+  selectedModel = id;
+  const out = modelPrice(id);
+  const tier = priceTier(out);
+  modelDot.className = 'dropdown__dot' + (tier ? ` dropdown__dot--${tier}` : '');
+  modelLabel.textContent = displayName(id);
+  modelLabel.title = `${displayName(id)}${out > 0 ? ` — output: $${out}/1M токенов` : ''}`;
+  resetGenerationDefaults();
+}
+
+function renderModelMenu(models) {
+  modelMenu.innerHTML = '';
+
+  const groups = [];
+  const seen = new Map();
+  for (const m of models) {
+    const label = modelGroupLabel(m.owned_by);
+    if (!seen.has(label)) {
+      const header = document.createElement('div');
+      header.className = 'dropdown__group';
+      header.textContent = label;
+      seen.set(label, { header, list: [] });
+      groups.push(seen.get(label));
+    }
+    seen.get(label).list.push(m);
   }
+
+  for (const group of groups) {
+    group.list.sort((a, b) => modelPrice(b.id) - modelPrice(a.id));
+    modelMenu.appendChild(group.header);
+    for (const m of group.list) {
+      const out = modelPrice(m.id);
+      const tier = priceTier(out);
+
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'dropdown__item';
+      item.dataset.id = m.id;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', String(m.id === selectedModel));
+
+      const dot = document.createElement('span');
+      dot.className = 'dropdown__dot' + (tier ? ` dropdown__dot--${tier}` : '');
+      dot.style.opacity = tier ? '1' : '0.4';
+
+      const name = document.createElement('span');
+      name.className = 'dropdown__name';
+      name.textContent = displayName(m.id);
+      name.title = `${displayName(m.id)}${out > 0 ? ` — output: $${out}/1M токенов` : ''}`;
+
+      const priceEl = document.createElement('span');
+      priceEl.className = 'dropdown__price';
+      priceEl.textContent = priceLabel(out);
+
+      const check = document.createElement('span');
+      check.className = 'dropdown__check';
+      check.textContent = '✓';
+
+      item.append(dot, name, priceEl, check);
+      item.addEventListener('click', () => {
+        setSelectedModel(m.id);
+        renderModelMenu(models);
+        closeModelMenu();
+      });
+      modelMenu.appendChild(item);
+    }
+  }
+
+  const legend = document.createElement('div');
+  legend.className = 'dropdown__legend';
+  legend.innerHTML =
+    '<span><span class="dropdown__legend-dot dropdown__legend-dot--cheap"></span>дешёвый</span>' +
+    '<span><span class="dropdown__legend-dot dropdown__legend-dot--medium"></span>средний</span>' +
+    '<span><span class="dropdown__legend-dot dropdown__legend-dot--expensive"></span>дорогой</span>';
+  modelMenu.appendChild(legend);
+}
+
+function openModelMenu() {
+  modelMenu.hidden = false;
+  modelDropdown.dataset.open = 'true';
+  modelButton.setAttribute('aria-expanded', 'true');
+}
+
+function closeModelMenu() {
+  modelMenu.hidden = true;
+  modelDropdown.dataset.open = 'false';
+  modelButton.setAttribute('aria-expanded', 'false');
+}
+
+function loadModels() {
+  fetch('/api/models')
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then((data) => {
+      const models = (Array.isArray(data.data) ? data.data : [])
+        .filter((m) => m && typeof m.id === 'string')
+        .map((m) => ({ id: m.id, owned_by: typeof m.owned_by === 'string' ? m.owned_by : '' }));
+      if (models.length === 0) throw new Error('empty model list');
+      renderModelMenu(models);
+      const preferred = models.some((m) => m.id === FALLBACK_MODELS[0])
+        ? FALLBACK_MODELS[0]
+        : models[0].id;
+      setSelectedModel(preferred);
+    })
+    .catch(() => {
+      const fallback = FALLBACK_MODELS.map((id) => ({ id, owned_by: 'deepseek' }));
+      renderModelMenu(fallback);
+      setSelectedModel(fallback[0].id);
+    });
 }
 
 function getActiveChat() {
@@ -109,7 +274,6 @@ function createChat() {
     id: `chat-${++chatCounter}`,
     title: 'Новый чат',
     history: [],
-    prevUsage: null,
     renamed: false,
     isSummary: false,
     busy: false,
@@ -182,7 +346,7 @@ function closeChat(chat) {
   }
 }
 
-function addMessage(chat, role, text) {
+function createMessageEl(role, text) {
   const el = document.createElement('div');
   el.classList.add('message', `message--${role}`);
   if (!text) el.classList.add('message--empty');
@@ -190,6 +354,11 @@ function addMessage(chat, role, text) {
   content.className = 'message__content';
   content.textContent = text || '...';
   el.appendChild(content);
+  return el;
+}
+
+function addMessage(chat, role, text) {
+  const el = createMessageEl(role, text);
   chat.messagesEl.appendChild(el);
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
   return el;
@@ -226,16 +395,6 @@ function setBubbleText(chat, el, text) {
   el.classList.remove('message--empty');
   el.querySelector('.message__content').textContent = text;
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
-}
-
-function setBubbleTokens(el, n) {
-  let hint = el.querySelector('.message__tokens');
-  if (!hint) {
-    hint = document.createElement('div');
-    hint.className = 'message__tokens';
-    el.appendChild(hint);
-  }
-  hint.textContent = `токенов: ${n}`;
 }
 
 function createReasoning(el) {
@@ -312,18 +471,40 @@ function emptyResponseText(usage, finishReason) {
   return '(пустой ответ)';
 }
 
-function userMessageTokens(chat, usage) {
-  const prevTotal = chat.prevUsage
-    ? chat.prevUsage.prompt_tokens + chat.prevUsage.completion_tokens
-    : 0;
-  return Math.max(0, usage.prompt_tokens - prevTotal - MESSAGE_OVERHEAD_TOKENS);
+function buildQaMeta(model, startTime, usage) {
+  const time = (Date.now() - startTime) / 1000;
+  const input = usage ? usage.prompt_tokens : null;
+  const output = usage ? usage.completion_tokens : null;
+  const reasoning = usage && usage.completion_tokens_details ? usage.completion_tokens_details.reasoning_tokens : null;
+  const cost = usage ? messageCost(model, usage.prompt_tokens, usage.completion_tokens) : null;
+  return {
+    time: `${time.toFixed(2)}s`,
+    input: input === null ? '–' : String(input),
+    output: output === null ? '–' : String(output),
+    reasoning: reasoning === null ? '–' : String(reasoning),
+    cost: cost === null ? '–' : formatCost(cost),
+    model
+  };
 }
 
-async function streamAssistant(chat, userEl) {
+function renderQaStats(qaEl, stats) {
+  const el = document.createElement('div');
+  el.className = 'qa__stats';
+  el.textContent =
+    `время: ${stats.time}, вход: ${stats.input}, выход: ${stats.output}, ` +
+    `рассужд.: ${stats.reasoning}, цена: ${stats.cost}`;
+  qaEl.appendChild(el);
+  qaEl.parentElement.scrollTop = qaEl.parentElement.scrollHeight;
+}
+
+async function streamAssistant(chat, qaEl) {
   chat.busy = true;
   updateSendButton();
 
-  const assistantEl = addMessage(chat, 'assistant', '');
+  const assistantEl = createMessageEl('assistant', '');
+  qaEl.appendChild(assistantEl);
+  const model = currentModel();
+  const startTime = Date.now();
   const jsonMode = !modeToggle.checked;
   const responseDate = new Date().toISOString();
   let full = '';
@@ -333,7 +514,7 @@ async function streamAssistant(chat, userEl) {
   let finishReason = null;
 
   try {
-    let outgoingMessages = [...chat.history];
+    let outgoingMessages = chat.history.map((m) => ({ role: m.role, content: m.content }));
     if (chat.isSummary) {
       const context = buildGlobalContext();
       outgoingMessages.unshift({
@@ -352,7 +533,7 @@ async function streamAssistant(chat, userEl) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages: outgoingMessages,
-        model: currentModel(),
+        model,
         ...collectSettings()
       })
     });
@@ -391,23 +572,19 @@ async function streamAssistant(chat, userEl) {
     } else {
       setBubbleText(chat, assistantEl, finalResponse);
     }
-    chat.history.push({ role: 'assistant', content: full });
 
     if (usage) {
-      if (userEl) setBubbleTokens(userEl, userMessageTokens(chat, usage));
-      setBubbleTokens(assistantEl, usage.completion_tokens);
       tokensBurned += usage.total_tokens;
-      chat.prevUsage = {
-        prompt_tokens: usage.prompt_tokens,
-        completion_tokens: usage.completion_tokens
-      };
       renderTotal();
-      if (jsonMode) renderJsonEnvelope(chat, assistantEl, thinkingText, finalResponse, responseDate, usage);
     }
+    const meta = buildQaMeta(model, startTime, usage);
+    chat.history.push({ role: 'assistant', content: full, meta });
+    renderQaStats(qaEl, meta);
   } catch (err) {
     setBubbleText(chat, assistantEl, `Ошибка: ${err.message}`);
     assistantEl.classList.add('message--error');
     if (chat.history[chat.history.length - 1].role === 'user') chat.history.pop();
+    renderQaStats(qaEl, buildQaMeta(model, startTime, null));
   } finally {
     chat.busy = false;
     updateSendButton();
@@ -416,7 +593,12 @@ async function streamAssistant(chat, userEl) {
 
 async function sendMessage(chat, text) {
   chat.history.push({ role: 'user', content: text });
-  const userEl = addMessage(chat, 'user', text);
+
+  const qaEl = document.createElement('div');
+  qaEl.className = 'qa';
+  chat.messagesEl.appendChild(qaEl);
+  qaEl.appendChild(createMessageEl('user', text));
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
 
   if (!chat.renamed) {
     chat.renamed = true;
@@ -424,7 +606,7 @@ async function sendMessage(chat, text) {
     renderTabs();
   }
 
-  await streamAssistant(chat, userEl);
+  await streamAssistant(chat, qaEl);
 }
 
 function findSummaryChat() {
@@ -436,7 +618,6 @@ function createSummaryChat() {
     id: `chat-${++chatCounter}`,
     title: SUMMARY_CHAT_TITLE,
     history: [],
-    prevUsage: null,
     renamed: true,
     isSummary: true,
     busy: false,
@@ -463,6 +644,12 @@ function buildGlobalContext() {
     for (const m of chat.history) {
       const label = m.role === 'user' ? 'Пользователь' : 'Ассистент';
       lines.push(`${label}: ${m.content}`);
+      if (m.role === 'assistant' && m.meta) {
+        lines.push(
+          `[модель: ${m.meta.model} | время: ${m.meta.time}, вход: ${m.meta.input}, ` +
+          `выход: ${m.meta.output}, рассужд.: ${m.meta.reasoning}, цена: ${m.meta.cost}]`
+        );
+      }
     }
     parts.push(lines.join('\n'));
   }
@@ -545,7 +732,22 @@ if (topPRange) {
   });
 }
 
-modelSelect.addEventListener('change', resetGenerationDefaults);
+modelButton.addEventListener('click', () => {
+  if (modelMenu.hidden) openModelMenu();
+  else closeModelMenu();
+});
+
+modelButton.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeModelMenu();
+    modelButton.focus();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!modelDropdown.contains(e.target)) closeModelMenu();
+});
 
 modeToggle.addEventListener('change', () => {
   modeState.textContent = modeToggle.checked ? 'Обычный' : 'JSON';

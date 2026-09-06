@@ -1,15 +1,44 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { Readable } = require('stream');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODELS_URL = 'https://api.deepseek.com/models';
+const OPENCODE_API_KEY = process.env.OPENCODE_API_KEY;
+const OPENCODE_CHAT_URL = 'https://opencode.ai/zen/go/v1/chat/completions';
+const OPENCODE_MODELS_URL = 'https://opencode.ai/zen/go/v1/models';
+const OPENCODE_ZEN_CHAT_URL = 'https://opencode.ai/zen/v1/chat/completions';
+const OPENCODE_ZEN_MODELS_URL = 'https://opencode.ai/zen/v1/models';
+const OPENCODE_PREFIX = 'opencode/';
+const OPENCODE_SESSION_ID = crypto.randomUUID();
 const DEFAULT_MODEL = 'deepseek-chat';
 const MODEL_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
 const MIN_TOP_P = 0.01;
+const MIN_TEMPERATURE = 0;
+const MAX_TEMPERATURE = 2;
+
+const GO_CHAT_MODELS = new Set([
+  'glm-5.3', 'glm-5.3-flash', 'glm-5.2', 'glm-5.1',
+  'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6',
+  'longcat-2.0',
+  'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp',
+  'mimo-v2.5', 'mimo-v2.5-pro',
+  'hy4-preview', 'hy3',
+  'omen-alpha'
+]);
+
+const ZEN_FREE_MODELS = new Set([
+  'big-pickle',
+  'deepseek-v4-flash-free',
+  'mimo-v2.5-free',
+  'ling-3.0-flash-fin-free',
+  'nemotron-3-ultra-free',
+  'nemotron-3.5-lightning-free'
+]);
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -68,7 +97,12 @@ async function readBody(req) {
 
 function sanitizeSettings(body) {
   const out = {};
-  if (typeof body.temperature === 'number' && Number.isFinite(body.temperature) && body.temperature >= 0 && body.temperature <= 1) {
+  if (
+    typeof body.temperature === 'number' &&
+    Number.isFinite(body.temperature) &&
+    body.temperature >= MIN_TEMPERATURE &&
+    body.temperature <= MAX_TEMPERATURE
+  ) {
     out.temperature = body.temperature;
   }
   if (typeof body.top_p === 'number' && Number.isFinite(body.top_p) && body.top_p >= 0 && body.top_p <= 1) {
@@ -94,12 +128,23 @@ function sanitizeSettings(body) {
   return out;
 }
 
-async function handleChat(req, res) {
-  if (!DEEPSEEK_API_KEY) {
-    sendJson(res, 500, { error: 'DEEPSEEK_API_KEY is not set on the server' });
-    return;
+function upstreamErrorMessage(rawText) {
+  if (!rawText) return 'no details';
+  try {
+    const data = JSON.parse(rawText);
+    if (data && typeof data === 'object') {
+      const err = data.error;
+      if (typeof err === 'string' && err) return err;
+      if (err && typeof err.message === 'string' && err.message) return err.message;
+    }
+  } catch {
+    // not JSON — fall through
   }
+  const trimmed = rawText.trim();
+  return trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed;
+}
 
+async function handleChat(req, res) {
   let body;
   try {
     body = JSON.parse(await readBody(req));
@@ -115,14 +160,48 @@ async function handleChat(req, res) {
   }
 
   const rawModel = typeof body.model === 'string' ? body.model.trim() : '';
-  const model = rawModel && MODEL_NAME_RE.test(rawModel) ? rawModel : DEFAULT_MODEL;
+  const isOpenCode = rawModel.startsWith(OPENCODE_PREFIX);
+  const provider = isOpenCode ? 'OpenCode' : 'DeepSeek';
+  let model = rawModel && MODEL_NAME_RE.test(rawModel) ? rawModel : DEFAULT_MODEL;
+  let url = DEEPSEEK_URL;
+  let apiKey = DEEPSEEK_API_KEY;
 
-  const upstream = await fetch(DEEPSEEK_URL, {
+  if (isOpenCode) {
+    model = rawModel.slice(OPENCODE_PREFIX.length);
+    if (!MODEL_NAME_RE.test(model)) {
+      sendJson(res, 400, { error: `Unsupported model: ${model}` });
+      return;
+    }
+    if (GO_CHAT_MODELS.has(model)) {
+      url = OPENCODE_CHAT_URL;
+    } else if (ZEN_FREE_MODELS.has(model)) {
+      url = OPENCODE_ZEN_CHAT_URL;
+    } else {
+      sendJson(res, 400, { error: `Unsupported model: ${model}` });
+      return;
+    }
+    apiKey = OPENCODE_API_KEY;
+  }
+
+  if (!apiKey) {
+    sendJson(res, 500, {
+      error: isOpenCode ? 'OPENCODE_API_KEY is not set on the server' : 'DEEPSEEK_API_KEY is not set on the server'
+    });
+    return;
+  }
+
+  const upstreamHeaders = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+    'User-Agent': 'pomogator2k/1.0 (https://github.com/vitchuk/ai-challenge)'
+  };
+  if (isOpenCode) {
+    upstreamHeaders['x-opencode-session'] = OPENCODE_SESSION_ID;
+  }
+
+  const upstream = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${DEEPSEEK_API_KEY}`
-    },
+    headers: upstreamHeaders,
     body: JSON.stringify({
       model,
       messages,
@@ -134,8 +213,8 @@ async function handleChat(req, res) {
 
   if (!upstream.ok) {
     const errText = await upstream.text();
-    console.error('DeepSeek API error:', upstream.status, errText);
-    sendJson(res, upstream.status, { error: `DeepSeek API error: ${upstream.status}` });
+    console.error(`${provider} API error:`, upstream.status, errText);
+    sendJson(res, upstream.status, { error: `${provider} API error: ${upstream.status} — ${upstreamErrorMessage(errText)}` });
     return;
   }
 
@@ -152,26 +231,75 @@ async function handleChat(req, res) {
   req.on('close', () => stream.destroy());
 }
 
+async function fetchModelIds(url, apiKey, transform, extraHeaders) {
+  const upstream = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}`, ...extraHeaders }
+  });
+  if (!upstream.ok) throw new Error(`HTTP ${upstream.status}`);
+  const data = await upstream.json();
+  const items = Array.isArray(data.data) ? data.data : [];
+  return items
+    .map((m) => (m && typeof m.id === 'string' ? transform(m.id) : null))
+    .filter(Boolean);
+}
+
 async function handleModels(res) {
-  if (!DEEPSEEK_API_KEY) {
-    sendJson(res, 500, { error: 'DEEPSEEK_API_KEY is not set on the server' });
+  if (!DEEPSEEK_API_KEY && !OPENCODE_API_KEY) {
+    sendJson(res, 500, { error: 'No API keys configured (DEEPSEEK_API_KEY / OPENCODE_API_KEY)' });
     return;
   }
 
-  try {
-    const upstream = await fetch(DEEPSEEK_MODELS_URL, {
-      headers: { Authorization: `Bearer ${DEEPSEEK_API_KEY}` }
-    });
-    if (!upstream.ok) {
-      sendJson(res, upstream.status, { error: `DeepSeek API error: ${upstream.status}` });
-      return;
+  const models = [];
+  const errors = [];
+
+  if (DEEPSEEK_API_KEY) {
+    try {
+      const ids = await fetchModelIds(DEEPSEEK_MODELS_URL, DEEPSEEK_API_KEY, (id) => id);
+      for (const id of ids) models.push({ id, owned_by: 'deepseek' });
+    } catch (err) {
+      errors.push(`DeepSeek: ${err.message}`);
     }
-    const data = await upstream.text();
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(data);
-  } catch {
-    sendJson(res, 502, { error: 'Failed to reach DeepSeek API' });
   }
+
+  if (OPENCODE_API_KEY) {
+    const openCodeHeaders = {
+      'x-opencode-session': OPENCODE_SESSION_ID,
+      'User-Agent': 'pomogator2k/1.0 (https://github.com/vitchuk/ai-challenge)'
+    };
+
+    try {
+      const ids = await fetchModelIds(OPENCODE_MODELS_URL, OPENCODE_API_KEY, (id) => id, openCodeHeaders);
+      for (const id of ids) {
+        if (GO_CHAT_MODELS.has(id)) {
+          models.push({ id: `${OPENCODE_PREFIX}${id}`, owned_by: 'opencode' });
+        }
+      }
+    } catch (err) {
+      errors.push(`OpenCode Go: ${err.message}`);
+    }
+
+    try {
+      const ids = await fetchModelIds(OPENCODE_ZEN_MODELS_URL, OPENCODE_API_KEY, (id) => id, openCodeHeaders);
+      for (const id of ids) {
+        if (ZEN_FREE_MODELS.has(id)) {
+          models.push({ id: `${OPENCODE_PREFIX}${id}`, owned_by: 'opencode' });
+        }
+      }
+    } catch (err) {
+      errors.push(`OpenCode Zen (free): ${err.message}`);
+    }
+  }
+
+  if (models.length === 0) {
+    sendJson(res, 502, { error: `Failed to load models: ${errors.join('; ')}` });
+    return;
+  }
+
+  if (errors.length > 0) {
+    console.warn('Some model providers failed to load:', errors.join('; '));
+  }
+
+  sendJson(res, 200, { object: 'list', data: models });
 }
 
 const server = http.createServer(async (req, res) => {
