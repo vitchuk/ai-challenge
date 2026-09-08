@@ -1,4 +1,7 @@
-node_modules/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
 .env
 npm-debug.log*
 .DS_Store
