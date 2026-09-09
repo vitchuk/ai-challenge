@@ -19,60 +19,70 @@ const modeState = document.getElementById('mode-state');
 const newChatBtn = document.getElementById('new-chat');
 const summarizeBtn = document.getElementById('summarize');
 const tabsListEl = document.getElementById('tabs-list');
+const commandMenu = document.getElementById('command-menu');
+const commandModal = document.getElementById('command-modal');
+const modalBody = document.getElementById('modal-body');
+const modalResult = document.getElementById('modal-result');
+const modalStats = document.getElementById('modal-stats');
+const modalCopy = document.getElementById('modal-copy');
+const modalCloseBtn = document.getElementById('modal-close-btn');
+const modalClose = document.getElementById('modal-close');
 
-const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+// ── Консольное логирование клиента ─────────────────────────────────────────
+// Отображает в консоли браузера всё, что клиент отправляет на сервер
+// и получает от него (см. console.log). Флаг можно отключить вручную.
+const CLIENT_LOG_ENABLED = true;
+
+function logClient(kind, label, payload) {
+  if (!CLIENT_LOG_ENABLED) return;
+  const time = new Date().toISOString();
+  if (kind === 'send') {
+    console.groupCollapsed(`[клиент→сервер] ${time} — ${label}`);
+  } else {
+    console.groupCollapsed(`[клиент←сервер] ${time} — ${label}`);
+  }
+  console.log(payload);
+  console.groupEnd();
+}
+
+// ── Команды (автокомплит) ───────────────────────────────────────────────────
+const COMMANDS = [
+  {
+    name: '/optimize-prompt',
+    description: 'Сгенерировать оптимизированный промпт'
+  }
+];
+
+const OPTIMIZE_SYSTEM_TEMPLATE =
+  'Действуй как профессиональный промт-инженер. Создай детальный промт ' +
+  'для языковой модели по запросу: USER_TEXT. Промпт должен быть на языке ' +
+  'запроса, лаконичен и структурирован.';
+
+// ── Настройки / модели ─────────────────────────────────────────────────────
+const FALLBACK_MODELS = [
+  { id: 'deepseek-v4-flash', owned_by: 'deepseek' },
+  { id: 'deepseek-v4-pro', owned_by: 'deepseek' }
+];
 
 const TIER_CHEAP_MAX = 1;
 const TIER_MEDIUM_MAX = 4;
 
-const MODEL_PRICES = {
-  'deepseek-v4-flash': { in: 0.22, out: 0.66 },
-  'deepseek-v4-flash-vision-exp': { in: 0.22, out: 0.66 },
-  'deepseek-v4-pro': { in: 0.66, out: 1.98 },
-  'deepseek-chat': { in: 0.22, out: 0.66 },
-  'deepseek-reasoner': { in: 0.22, out: 0.66 },
-  'opencode/glm-5.3-flash': { in: 0.15, out: 0.5 },
-  'opencode/glm-5.3': { in: 1.4, out: 4.4 },
-  'opencode/glm-5.2': { in: 1.4, out: 4.4 },
-  'opencode/glm-5.1': { in: 1.4, out: 4.4 },
-  'opencode/kimi-k3': { in: 3, out: 15 },
-  'opencode/kimi-k2.7-code': { in: 0.95, out: 4 },
-  'opencode/kimi-k2.6': { in: 0.95, out: 4 },
-  'opencode/longcat-2.0': { in: 0.3, out: 1.2 },
-  'opencode/deepseek-v4-pro': { in: 0.66, out: 1.98 },
-  'opencode/deepseek-v4-flash': { in: 0.22, out: 0.66 },
-  'opencode/deepseek-v4-flash-vision-exp': { in: 0.22, out: 0.66 },
-  'opencode/mimo-v2.5': { in: 0.14, out: 0.28 },
-  'opencode/mimo-v2.5-pro': { in: 0.435, out: 0.87 },
-  'opencode/hy4-preview': { in: 0.834, out: 2.501 },
-  'opencode/hy3': { in: 0.14, out: 0.58 },
-  'opencode/omen-alpha': { in: 0.2, out: 0.66 },
-  'opencode/big-pickle': { in: 0, out: 0 },
-  'opencode/deepseek-v4-flash-free': { in: 0, out: 0 },
-  'opencode/mimo-v2.5-free': { in: 0, out: 0 },
-  'opencode/ling-3.0-flash-fin-free': { in: 0, out: 0 },
-  'opencode/nemotron-3-ultra-free': { in: 0, out: 0 },
-  'opencode/nemotron-3.5-lightning-free': { in: 0, out: 0 }
-};
-
 const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в формате JSON.';
-
 const SUMMARY_CHAT_TITLE = 'Подвести итоги';
-
-const SUMMARY_CONTEXT_PROMPT =
-  'У тебя есть доступ к содержимому всех открытых чатов. Используй его при ответе на вопрос пользователя.';
 
 const chats = [];
 let activeChatId = null;
 let chatCounter = 0;
 let tokensBurned = 0;
+let selectedModel = null;
 
+// ── Базовые UI-утилиты ─────────────────────────────────────────────────────
 function renderTotal() {
   tokensTotalEl.textContent = String(tokensBurned);
 }
 
 function currentModel() {
-  return selectedModel || FALLBACK_MODELS[0];
+  return selectedModel || FALLBACK_MODELS[0].id;
 }
 
 function collectSettings() {
@@ -92,6 +102,11 @@ function collectSettings() {
   return settings;
 }
 
+function collectSystemPrompt() {
+  if (!modeToggle.checked) return JSON_SYSTEM_PROMPT;
+  return null;
+}
+
 function resetGenerationDefaults() {
   if (tempRange) {
     tempRange.value = '1';
@@ -103,7 +118,49 @@ function resetGenerationDefaults() {
   }
 }
 
-let selectedModel = null;
+function resetChatPanel() {
+  resetGenerationDefaults();
+  if (maxTokensInput) maxTokensInput.value = '';
+  if (stopInput) stopInput.value = '';
+}
+
+function defaultChatSettings() {
+  return {
+    temperature: 1,
+    top_p: 1,
+    max_tokens: null,
+    stop: [],
+    response_format: null
+  };
+}
+
+function normalizeServerSettings(s) {
+  const def = defaultChatSettings();
+  if (!s || typeof s !== 'object') return def;
+  return {
+    temperature: typeof s.temperature === 'number' ? s.temperature : def.temperature,
+    top_p: typeof s.top_p === 'number' ? s.top_p : def.top_p,
+    max_tokens: s.max_tokens || null,
+    stop: Array.isArray(s.stop) ? s.stop : [],
+    response_format: s.response_format || null
+  };
+}
+
+function applyChatSettings(chat) {
+  const s = chat.settings || defaultChatSettings();
+  if (tempRange) {
+    const t = typeof s.temperature === 'number' ? s.temperature : 1;
+    tempRange.value = String(t);
+    tempValue.textContent = String(t);
+  }
+  if (topPRange) {
+    const p = typeof s.top_p === 'number' ? s.top_p : 1;
+    topPRange.value = String(p);
+    topPValue.textContent = String(p);
+  }
+  if (maxTokensInput) maxTokensInput.value = s.max_tokens ? String(s.max_tokens) : '';
+  if (stopInput) stopInput.value = Array.isArray(s.stop) ? s.stop.join(', ') : '';
+}
 
 function displayName(id) {
   return id.startsWith('opencode/') ? id.slice('opencode/'.length) : id;
@@ -113,25 +170,6 @@ function modelGroupLabel(ownedBy) {
   if (ownedBy === 'deepseek') return 'DeepSeek';
   if (ownedBy === 'opencode') return 'OpenCode Go';
   return ownedBy || 'Другие';
-}
-
-function modelPrice(id) {
-  const p = MODEL_PRICES[id];
-  return p && typeof p.out === 'number' ? p.out : -1;
-}
-
-function messageCost(id, promptTokens, completionTokens) {
-  const p = MODEL_PRICES[id];
-  if (!p || typeof p.in !== 'number' || typeof p.out !== 'number') return null;
-  return (promptTokens * p.in + completionTokens * p.out) / 1e6;
-}
-
-function formatCost(cost) {
-  if (typeof cost !== 'number') return '–';
-  if (cost === 0) return '0';
-  let s = cost.toFixed(7).replace(/0+$/, '');
-  s = s.replace(/\.$/, '');
-  return s;
 }
 
 function priceTier(price) {
@@ -147,14 +185,34 @@ function priceLabel(price) {
   return `$${price.toFixed(2)}/1M`;
 }
 
-function setSelectedModel(id) {
+function formatCost(cost) {
+  if (typeof cost !== 'number') return '–';
+  if (cost === 0) return '0';
+  let s = cost.toFixed(7).replace(/0+$/, '');
+  s = s.replace(/\.$/, '');
+  return s;
+}
+
+function formatMetaLine(meta) {
+  const time = meta && typeof meta.time_s === 'number' ? `${meta.time_s.toFixed(2)}s` : '–';
+  const input = meta && meta.prompt_tokens != null ? String(meta.prompt_tokens) : '–';
+  const output = meta && meta.completion_tokens != null ? String(meta.completion_tokens) : '–';
+  const reasoning =
+    meta && meta.reasoning_tokens != null ? String(meta.reasoning_tokens) : '–';
+  const cost = meta ? formatCost(meta.cost_usd) : '–';
+  const model = meta && meta.model ? meta.model : currentModel();
+  return { time, input, output, reasoning, cost, model };
+}
+
+function setSelectedModel(id, opts) {
+  const resetParams = !opts || opts.resetParams !== false;
   selectedModel = id;
   const out = modelPrice(id);
   const tier = priceTier(out);
   modelDot.className = 'dropdown__dot' + (tier ? ` dropdown__dot--${tier}` : '');
   modelLabel.textContent = displayName(id);
   modelLabel.title = `${displayName(id)}${out > 0 ? ` — output: $${out}/1M токенов` : ''}`;
-  resetGenerationDefaults();
+  if (resetParams) resetGenerationDefaults();
 }
 
 function renderModelMenu(models) {
@@ -175,10 +233,10 @@ function renderModelMenu(models) {
   }
 
   for (const group of groups) {
-    group.list.sort((a, b) => modelPrice(b.id) - modelPrice(a.id));
+    group.list.sort((a, b) => (b.price ?? -1) - (a.price ?? -1));
     modelMenu.appendChild(group.header);
     for (const m of group.list) {
-      const out = modelPrice(m.id);
+      const out = typeof m.price === 'number' ? m.price : -1;
       const tier = priceTier(out);
 
       const item = document.createElement('button');
@@ -210,6 +268,9 @@ function renderModelMenu(models) {
         setSelectedModel(m.id);
         renderModelMenu(models);
         closeModelMenu();
+        // запоминаем выбранную модель в активном чате
+        const chat = getActiveChat();
+        if (chat) chat.model = m.id;
       });
       modelMenu.appendChild(item);
     }
@@ -223,6 +284,14 @@ function renderModelMenu(models) {
     '<span><span class="dropdown__legend-dot dropdown__legend-dot--expensive"></span>дорогой</span>';
   modelMenu.appendChild(legend);
 }
+
+function modelPrice(id) {
+  // Цена берётся из последнего списка моделей, полученного с сервера.
+  const m = (cachedModels || []).find((x) => x.id === id);
+  return m && typeof m.price === 'number' ? m.price : -1;
+}
+
+let cachedModels = null;
 
 function openModelMenu() {
   modelMenu.hidden = false;
@@ -245,21 +314,66 @@ function loadModels() {
     .then((data) => {
       const models = (Array.isArray(data.data) ? data.data : [])
         .filter((m) => m && typeof m.id === 'string')
-        .map((m) => ({ id: m.id, owned_by: typeof m.owned_by === 'string' ? m.owned_by : '' }));
+        .map((m) => ({
+          id: m.id,
+          owned_by: typeof m.owned_by === 'string' ? m.owned_by : '',
+          price: typeof m.price === 'number' ? m.price : -1
+        }));
       if (models.length === 0) throw new Error('empty model list');
+      cachedModels = models;
       renderModelMenu(models);
-      const preferred = models.some((m) => m.id === FALLBACK_MODELS[0])
-        ? FALLBACK_MODELS[0]
-        : models[0].id;
-      setSelectedModel(preferred);
+      if (selectedModel === null) {
+        const preferred = models.some((m) => m.id === FALLBACK_MODELS[0].id)
+          ? FALLBACK_MODELS[0].id
+          : models[0].id;
+        setSelectedModel(preferred);
+      }
     })
     .catch(() => {
-      const fallback = FALLBACK_MODELS.map((id) => ({ id, owned_by: 'deepseek' }));
-      renderModelMenu(fallback);
-      setSelectedModel(fallback[0].id);
+      cachedModels = FALLBACK_MODELS.map((m) => ({ ...m, price: -1 }));
+      renderModelMenu(FALLBACK_MODELS);
+      if (selectedModel === null) setSelectedModel(FALLBACK_MODELS[0].id);
     });
 }
 
+// ── HTTP API клиента ────────────────────────────────────────────────────────
+async function apiCreateSession(body) {
+  logClient('send', 'POST /api/sessions', body);
+  const res = await fetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Ошибка ${res.status}`);
+  }
+  const data = await res.json();
+  logClient('receive', 'POST /api/sessions → 201', data);
+  return data;
+}
+
+async function apiDeleteSession(sid) {
+  logClient('send', `DELETE /api/sessions/${sid}`);
+  const res = await fetch(`/api/sessions/${sid}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Ошибка ${res.status}`);
+  }
+  logClient('receive', `DELETE /api/sessions/${sid} → ${res.status}`);
+}
+
+async function apiActivateSession(sid) {
+  logClient('send', `POST /api/sessions/${sid}/activate`);
+  const res = await fetch(`/api/sessions/${sid}/activate`, { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Ошибка ${res.status}`);
+  }
+  logClient('receive', `POST /api/sessions/${sid}/activate → ${res.status}`);
+}
+
+// ── Чат-сессии ─────────────────────────────────────────────────────────────
 function getActiveChat() {
   return chats.find((c) => c.id === activeChatId) || null;
 }
@@ -269,16 +383,24 @@ function updateSendButton() {
   sendBtn.disabled = Boolean(chat && chat.busy);
 }
 
-function createChat() {
+async function createChat(kind = 'chat', title = 'Новый чат') {
   const chat = {
     id: `chat-${++chatCounter}`,
-    title: 'Новый чат',
+    sid: null,
+    title,
     history: [],
     renamed: false,
-    isSummary: false,
+    kind,
     busy: false,
+    model: null,
+    settings: defaultChatSettings(),
     messagesEl: null
   };
+
+  // Новый чат: параметры и модель сбрасываются к дефолту (deepseek-v4-flash).
+  setSelectedModel(FALLBACK_MODELS[0].id);
+  resetChatPanel();
+  if (cachedModels) renderModelMenu(cachedModels);
 
   const messagesEl = document.createElement('div');
   messagesEl.className = 'chat__messages';
@@ -287,7 +409,24 @@ function createChat() {
   chat.messagesEl = messagesEl;
 
   chats.push(chat);
-  addMessage(chat, 'assistant', 'Привет! Чем могу помочь?');
+
+  // Создаём серверную сессию (для summary-чата — с типом summary).
+  try {
+    const body = { kind };
+    if (kind === 'summary') {
+      chat.renamed = true;
+    }
+    const created = await apiCreateSession(body);
+    chat.sid = created.id;
+  } catch (err) {
+    addMessage(chat, 'assistant', `Ошибка создания чата: ${err.message}`);
+  }
+
+  if (kind === 'chat') {
+    addMessage(chat, 'assistant', 'Привет! Чем могу помочь?');
+  } else {
+    addMessage(chat, 'assistant', 'Задайте вопрос с контекстом всех открытых чатов');
+  }
   return chat;
 }
 
@@ -324,17 +463,33 @@ function activateChat(chat) {
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
   renderTabs();
   updateSendButton();
+  // Восстанавливаем модель вкладки (без сброса параметров генерации).
+  setSelectedModel(chat.model || FALLBACK_MODELS[0].id, { resetParams: false });
+  if (cachedModels) renderModelMenu(cachedModels);
+  // Восстанавливаем инкапсулированные настройки чата в панель.
+  applyChatSettings(chat);
+  // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
+  if (chat.sid) {
+    apiActivateSession(chat.sid).catch((err) => {
+      logClient('receive', 'POST activate — ошибка', err.message);
+    });
+  }
 }
 
-function closeChat(chat) {
+async function closeChat(chat) {
   if (!confirm(`Закрыть чат «${chat.title}»? История будет удалена.`)) return;
 
   const idx = chats.indexOf(chat);
   chat.messagesEl.remove();
   chats.splice(idx, 1);
 
+  // Удаляем серверную сессию (освобождаем память сервера).
+  if (chat.sid) {
+    apiDeleteSession(chat.sid).catch(() => {});
+  }
+
   if (chats.length === 0) {
-    const fresh = createChat();
+    const fresh = await createChat();
     activateChat(fresh);
     return;
   }
@@ -346,6 +501,7 @@ function closeChat(chat) {
   }
 }
 
+// ── Рендер сообщений ───────────────────────────────────────────────────────
 function createMessageEl(role, text) {
   const el = document.createElement('div');
   el.classList.add('message', `message--${role}`);
@@ -381,11 +537,11 @@ async function* parseSSE(response) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) continue;
       const data = trimmed.slice(5).trim();
-      if (data === '[DONE]') return;
+      if (!data) continue;
       try {
         yield JSON.parse(data);
       } catch {
-        // ignore incomplete/empty frames
+        // ignore malformed frames
       }
     }
   }
@@ -395,6 +551,20 @@ function setBubbleText(chat, el, text) {
   el.classList.remove('message--empty');
   el.querySelector('.message__content').textContent = text;
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+}
+
+function showWaiter(containerEl) {
+  containerEl.textContent = '';
+  if (!containerEl.querySelector('.message__waiter')) {
+    const w = document.createElement('span');
+    w.className = 'message__waiter';
+    containerEl.appendChild(w);
+  }
+}
+
+function removeWaiter(containerEl) {
+  const w = containerEl.querySelector('.message__waiter');
+  if (w) w.remove();
 }
 
 function createReasoning(el) {
@@ -427,10 +597,9 @@ function createReasoning(el) {
   return node;
 }
 
-function appendReasoning(chat, el, text) {
+function setReasoningText(el, text) {
   const node = createReasoning(el);
-  node.querySelector('.message__reasoning-body').textContent += text;
-  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+  node.querySelector('.message__reasoning-body').textContent = text;
 }
 
 function finishReasoning(el) {
@@ -455,7 +624,7 @@ function renderJsonEnvelope(chat, el, thinking, response, date, usage) {
       thinking,
       response,
       date,
-      tokens: usage ? usage.completion_tokens : 0
+      tokens: usage && usage.completion_tokens != null ? usage.completion_tokens : 0
     },
     null,
     2
@@ -463,79 +632,55 @@ function renderJsonEnvelope(chat, el, thinking, response, date, usage) {
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
 }
 
-function emptyResponseText(usage, finishReason) {
+function emptyResponseText(meta, finishReason) {
   if (finishReason === 'length') {
-    const limit = maxTokensInput.value || (usage ? usage.completion_tokens : '');
+    const limit =
+      maxTokensInput.value || (meta && meta.completion_tokens != null ? meta.completion_tokens : '');
     return `<LLM уперлась в ограничение по токенам: ${limit}>`;
   }
   return '(пустой ответ)';
 }
 
-function buildQaMeta(model, startTime, usage) {
-  const time = (Date.now() - startTime) / 1000;
-  const input = usage ? usage.prompt_tokens : null;
-  const output = usage ? usage.completion_tokens : null;
-  const reasoning = usage && usage.completion_tokens_details ? usage.completion_tokens_details.reasoning_tokens : null;
-  const cost = usage ? messageCost(model, usage.prompt_tokens, usage.completion_tokens) : null;
-  return {
-    time: `${time.toFixed(2)}s`,
-    input: input === null ? '–' : String(input),
-    output: output === null ? '–' : String(output),
-    reasoning: reasoning === null ? '–' : String(reasoning),
-    cost: cost === null ? '–' : formatCost(cost),
-    model
-  };
-}
-
-function renderQaStats(qaEl, stats) {
+function renderQaStats(qaEl, line) {
   const el = document.createElement('div');
   el.className = 'qa__stats';
   el.textContent =
-    `время: ${stats.time}, вход: ${stats.input}, выход: ${stats.output}, ` +
-    `рассужд.: ${stats.reasoning}, цена: ${stats.cost}`;
+    `время: ${line.time}, вход: ${line.input}, выход: ${line.output}, ` +
+    `рассужд.: ${line.reasoning}, цена: ${line.cost}`;
   qaEl.appendChild(el);
   qaEl.parentElement.scrollTop = qaEl.parentElement.scrollHeight;
 }
 
+// ── Стрим ответа ассистента (серверные сессии) ─────────────────────────────
 async function streamAssistant(chat, qaEl) {
   chat.busy = true;
   updateSendButton();
 
   const assistantEl = createMessageEl('assistant', '');
   qaEl.appendChild(assistantEl);
-  const model = currentModel();
-  const startTime = Date.now();
+  const assistantContent = assistantEl.querySelector('.message__content');
+  showWaiter(assistantContent);
   const jsonMode = !modeToggle.checked;
   const responseDate = new Date().toISOString();
   let full = '';
   let thinkingText = '';
-  let thinking = false;
   let usage = null;
   let finishReason = null;
+  let finalMeta = null;
+
+  const payload = {
+    content: chat.history[chat.history.length - 1].content,
+    model: currentModel(),
+    settings: collectSettings(),
+    system_prompt: collectSystemPrompt()
+  };
 
   try {
-    let outgoingMessages = chat.history.map((m) => ({ role: m.role, content: m.content }));
-    if (chat.isSummary) {
-      const context = buildGlobalContext();
-      outgoingMessages.unshift({
-        role: 'system',
-        content: context
-          ? `${SUMMARY_CONTEXT_PROMPT}\n\n${context}`
-          : 'Открытые чаты пусты. Отвечай на вопрос пользователя без дополнительного контекста.'
-      });
-    }
-    if (jsonMode) {
-      outgoingMessages.unshift({ role: 'system', content: JSON_SYSTEM_PROMPT });
-    }
-
-    const res = await fetch('/api/chat', {
+    logClient('send', `POST /api/sessions/${chat.sid}/messages`, payload);
+    const res = await fetch(`/api/sessions/${chat.sid}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: outgoingMessages,
-        model,
-        ...collectSettings()
-      })
+      body: JSON.stringify(payload)
     });
 
     if (!res.ok || !res.body) {
@@ -544,47 +689,60 @@ async function streamAssistant(chat, qaEl) {
     }
 
     for await (const chunk of parseSSE(res)) {
-      if (chunk.usage) usage = chunk.usage;
-      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-      const delta = chunk.choices?.[0]?.delta;
-      if (delta?.reasoning_content) {
-        thinking = true;
-        thinkingText += delta.reasoning_content;
-        appendReasoning(chat, assistantEl, delta.reasoning_content);
-        if (jsonMode) renderJsonEnvelope(chat, assistantEl, thinkingText, full, responseDate, usage);
-      }
-      if (delta?.content) {
-        if (thinking) {
-          thinking = false;
-          finishReasoning(assistantEl);
+      logClient('receive', `POST /api/sessions/${chat.sid}/messages — событие`, chunk);
+      if (chunk.type === 'reasoning_start') {
+        createReasoning(assistantEl);
+        showWaiter(assistantContent);
+      } else if (chunk.type === 'reasoning_end') {
+        thinkingText = chunk.content || '';
+        if (thinkingText) setReasoningText(assistantEl, thinkingText);
+        finishReasoning(assistantEl);
+        showWaiter(assistantContent);
+      } else if (chunk.type === 'done') {
+        finalMeta = chunk.meta || null;
+        full = chunk.content || '';
+        if (chunk.meta && chunk.meta.completion_tokens != null) {
+          usage = { completion_tokens: chunk.meta.completion_tokens };
         }
-        full += delta.content;
-        if (jsonMode) renderJsonEnvelope(chat, assistantEl, thinkingText, full, responseDate, usage);
-        else setBubbleText(chat, assistantEl, full);
+        if (chunk.meta && chunk.meta.finish_reason) {
+          finishReason = chunk.meta.finish_reason;
+        }
+      } else if (chunk.type === 'error') {
+        throw new Error(chunk.error || 'Неизвестная ошибка сервера');
       }
     }
 
-    if (thinking) finishReasoning(assistantEl);
+    removeWaiter(assistantContent);
 
-    const finalResponse = full || emptyResponseText(usage, finishReason);
+    const finalResponse = full || emptyResponseText(finalMeta, finishReason);
     if (jsonMode) {
       renderJsonEnvelope(chat, assistantEl, thinkingText, finalResponse, responseDate, usage);
     } else {
       setBubbleText(chat, assistantEl, finalResponse);
     }
 
-    if (usage) {
-      tokensBurned += usage.total_tokens;
-      renderTotal();
+    // Счётчик израсходованных токенов (футер).
+    if (finalMeta) {
+      const total =
+        (finalMeta.prompt_tokens || 0) + (finalMeta.completion_tokens || 0);
+      if (total > 0) {
+        tokensBurned += total;
+        renderTotal();
+      }
     }
-    const meta = buildQaMeta(model, startTime, usage);
-    chat.history.push({ role: 'assistant', content: full, meta });
-    renderQaStats(qaEl, meta);
+
+    chat.history.push({
+      role: 'assistant',
+      content: full,
+      meta: finalMeta
+    });
+    renderQaStats(qaEl, formatMetaLine(finalMeta));
   } catch (err) {
+    removeWaiter(assistantContent);
     setBubbleText(chat, assistantEl, `Ошибка: ${err.message}`);
     assistantEl.classList.add('message--error');
     if (chat.history[chat.history.length - 1].role === 'user') chat.history.pop();
-    renderQaStats(qaEl, buildQaMeta(model, startTime, null));
+    renderQaStats(qaEl, formatMetaLine(null));
   } finally {
     chat.busy = false;
     updateSendButton();
@@ -609,61 +767,202 @@ async function sendMessage(chat, text) {
   await streamAssistant(chat, qaEl);
 }
 
-function findSummaryChat() {
-  return chats.find((c) => c.isSummary) || null;
-}
+// ── «Подвести итоги» ───────────────────────────────────────────────────────
+let summaryChatId = null;
 
-function createSummaryChat() {
-  const chat = {
-    id: `chat-${++chatCounter}`,
-    title: SUMMARY_CHAT_TITLE,
-    history: [],
-    renamed: true,
-    isSummary: true,
-    busy: false,
-    messagesEl: null
-  };
-
-  const messagesEl = document.createElement('div');
-  messagesEl.className = 'chat__messages';
-  messagesEl.hidden = true;
-  messagesRoot.appendChild(messagesEl);
-  chat.messagesEl = messagesEl;
-
-  chats.push(chat);
-  addMessage(chat, 'assistant', 'Задайте вопрос с контекстом всех открытых чатов');
-  return chat;
-}
-
-function buildGlobalContext() {
-  const parts = [];
-  for (const chat of chats) {
-    if (chat.isSummary) continue;
-    if (chat.history.length === 0) continue;
-    const lines = [`### Чат «${chat.title}»`];
-    for (const m of chat.history) {
-      const label = m.role === 'user' ? 'Пользователь' : 'Ассистент';
-      lines.push(`${label}: ${m.content}`);
-      if (m.role === 'assistant' && m.meta) {
-        lines.push(
-          `[модель: ${m.meta.model} | время: ${m.meta.time}, вход: ${m.meta.input}, ` +
-          `выход: ${m.meta.output}, рассужд.: ${m.meta.reasoning}, цена: ${m.meta.cost}]`
-        );
-      }
-    }
-    parts.push(lines.join('\n'));
-  }
-  return parts.join('\n\n');
-}
-
-function openSummaryChat() {
-  let chat = findSummaryChat();
+async function openSummaryChat() {
+  let chat = chats.find((c) => c.kind === 'summary');
   if (!chat) {
-    chat = createSummaryChat();
+    chat = await createChat('summary', SUMMARY_CHAT_TITLE);
   }
   activateChat(chat);
 }
 
+// ── Команда /optimize-prompt (модальное окно) ──────────────────────────────
+let optimizeSessionId = null;
+let optimizeAbortController = null;
+
+function showCommandModal() {
+  modalResult.textContent = '';
+  modalResult.classList.add('modal__result--empty');
+  modalStats.textContent = 'Генерация…';
+  commandModal.hidden = false;
+}
+
+function hideCommandModal() {
+  commandModal.hidden = true;
+  // При закрытии удаляем временную сессию (и с сервера, и из клиента).
+  if (optimizeSessionId) {
+    apiDeleteSession(optimizeSessionId).catch(() => {});
+    optimizeSessionId = null;
+  }
+  if (optimizeAbortController) {
+    optimizeAbortController.abort();
+    optimizeAbortController = null;
+  }
+}
+
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+  } catch (err) {
+    console.error('Не удалось скопировать в буфер обмена:', err);
+  }
+}
+
+async function runOptimizePrompt(userText) {
+  // Изолированный чат: новый сеанс, агент из исходного чата (модель — выбранная
+  // в текущем чате), настройки temperature 0.1 / top_p 0.01.
+  const systemPrompt = OPTIMIZE_SYSTEM_TEMPLATE.replace('USER_TEXT', userText);
+  const created = await apiCreateSession({
+    kind: 'ephemeral',
+    model: currentModel(),
+    settings: { temperature: 0.1, top_p: 0.01 },
+    system_prompt: systemPrompt
+  });
+  optimizeSessionId = created.id;
+  showCommandModal();
+  modalResult.classList.add('modal__result--empty');
+  showWaiter(modalResult);
+  modalStats.textContent = '';
+
+  optimizeAbortController = new AbortController();
+
+  const payload = { content: userText };
+  try {
+    logClient('send', `POST /api/sessions/${optimizeSessionId}/messages`, payload);
+    const res = await fetch(`/api/sessions/${optimizeSessionId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: optimizeAbortController.signal
+    });
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Ошибка ${res.status}`);
+    }
+
+    let full = '';
+    let thinkingText = '';
+    let thinking = false;
+    let finalMeta = null;
+
+    modalResult.classList.remove('modal__result--empty');
+    for await (const chunk of parseSSE(res)) {
+      logClient('receive', `POST /api/sessions/${optimizeSessionId}/messages — событие`, chunk);
+      if (chunk.type === 'reasoning_start') {
+        thinking = true;
+      } else if (chunk.type === 'reasoning_end') {
+        thinkingText = chunk.content || '';
+      } else if (chunk.type === 'done') {
+        finalMeta = chunk.meta || null;
+        full = chunk.content || '';
+      } else if (chunk.type === 'error') {
+        throw new Error(chunk.error || 'Неизвестная ошибка сервера');
+      }
+    }
+
+    removeWaiter(modalResult);
+
+    if (full) {
+      modalResult.textContent = full;
+    } else {
+      modalResult.textContent = thinking ? thinkingText || '(пустой ответ)' : '(пустой ответ)';
+    }
+
+    if (finalMeta) {
+      const total =
+        (finalMeta.prompt_tokens || 0) + (finalMeta.completion_tokens || 0);
+      if (total > 0) {
+        tokensBurned += total;
+        renderTotal();
+      }
+      const line = formatMetaLine(finalMeta);
+      modalStats.textContent =
+        `время: ${line.time}, вход: ${line.input}, выход: ${line.output}, ` +
+        `рассужд.: ${line.reasoning}, цена: ${line.cost}`;
+    } else {
+      modalStats.textContent = '';
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    removeWaiter(modalResult);
+    modalResult.textContent = `Ошибка: ${err.message}`;
+    modalResult.classList.add('modal__error');
+    modalStats.textContent = '';
+  }
+}
+
+// ── Автокомплит команд ─────────────────────────────────────────────────────
+let commandMenuActive = -1;
+let commandMenuItems = [];
+
+function currentCommandText() {
+  const value = input.value;
+  if (!value.startsWith('/')) return '';
+  return value.slice(0, value.indexOf(' ') === -1 ? value.length : value.indexOf(' '));
+}
+
+function updateCommandMenu() {
+  const prefix = currentCommandText();
+  if (!prefix) {
+    hideCommandMenu();
+    return;
+  }
+  const items = COMMANDS.filter((c) => c.name.startsWith(prefix) || prefix.startsWith(c.name));
+  if (items.length === 0) {
+    hideCommandMenu();
+    return;
+  }
+  commandMenu.innerHTML = '';
+  commandMenuItems = items;
+  commandMenuActive = 0;
+  for (let i = 0; i < items.length; i++) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'command-menu__item' + (i === 0 ? ' command-menu__item--active' : '');
+    const name = document.createElement('span');
+    name.className = 'command-menu__name';
+    name.textContent = items[i].name;
+    const desc = document.createElement('span');
+    desc.className = 'command-menu__desc';
+    desc.textContent = items[i].description;
+    btn.append(name, desc);
+    btn.addEventListener('click', () => {
+      insertCommand(items[i].name);
+    });
+    commandMenu.appendChild(btn);
+  }
+  commandMenu.hidden = false;
+}
+
+function hideCommandMenu() {
+  commandMenu.hidden = true;
+  commandMenuItems = [];
+  commandMenuActive = -1;
+}
+
+function insertCommand(commandName) {
+  // Вставка команды в начало строки поля ввода + пробел.
+  const rest = input.value.slice(currentCommandText().length);
+  const cleanedRest = rest.startsWith(' ') ? rest.slice(1) : rest;
+  input.value = `${commandName} ${cleanedRest}`;
+  hideCommandMenu();
+  input.focus();
+}
+
+// ── Авторесайз поля ввода ─────────────────────────────────────────────────
 function autoResize() {
   input.style.height = 'auto';
   const cs = getComputedStyle(input);
@@ -677,6 +976,7 @@ function autoResize() {
   input.style.overflowY = fits ? 'hidden' : 'auto';
 }
 
+// ── Обработчики событий ────────────────────────────────────────────────────
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
@@ -684,6 +984,23 @@ form.addEventListener('submit', async (e) => {
 
   const chat = getActiveChat();
   if (!chat || chat.busy) return;
+
+  // Команда /optimize-prompt
+  if (text === '/optimize-prompt' || text.startsWith('/optimize-prompt ')) {
+    const userText = text.slice('/optimize-prompt'.length).trim();
+    input.value = '';
+    autoResize();
+    if (!userText) {
+      addMessage(chat, 'assistant', 'Введите текст запроса после команды /optimize-prompt');
+      return;
+    }
+    try {
+      await runOptimizePrompt(userText);
+    } catch (err) {
+      addMessage(chat, 'assistant', `Ошибка: ${err.message}`);
+    }
+    return;
+  }
 
   input.value = '';
   autoResize();
@@ -696,13 +1013,54 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     form.requestSubmit();
+    return;
+  }
+
+  if (!commandMenu.hidden) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const item = commandMenuItems[commandMenuActive];
+      if (item) insertCommand(item.name);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      commandMenuActive = (commandMenuActive + 1) % commandMenuItems.length;
+      renderCommandMenuActive();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      commandMenuActive =
+        (commandMenuActive - 1 + commandMenuItems.length) % commandMenuItems.length;
+      renderCommandMenuActive();
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideCommandMenu();
+      return;
+    }
   }
 });
 
-input.addEventListener('input', autoResize);
+function renderCommandMenuActive() {
+  const items = commandMenu.querySelectorAll('.command-menu__item');
+  items.forEach((el, i) => {
+    el.classList.toggle('command-menu__item--active', i === commandMenuActive);
+  });
+}
 
-newChatBtn.addEventListener('click', () => {
-  const chat = createChat();
+input.addEventListener('input', () => {
+  autoResize();
+  updateCommandMenu();
+});
+
+input.addEventListener('focus', updateCommandMenu);
+input.addEventListener('blur', () => setTimeout(hideCommandMenu, 120));
+
+newChatBtn.addEventListener('click', async () => {
+  const chat = await createChat();
   activateChat(chat);
 });
 
@@ -720,16 +1078,35 @@ tabsListEl.addEventListener('click', (e) => {
   }
 });
 
+function syncActiveChatSettings() {
+  const chat = getActiveChat();
+  if (chat) chat.settings = collectSettings();
+}
+
 if (tempRange) {
   tempRange.addEventListener('input', () => {
     tempValue.textContent = tempRange.value;
+    syncActiveChatSettings();
   });
 }
 
 if (topPRange) {
   topPRange.addEventListener('input', () => {
     topPValue.textContent = topPRange.value;
+    syncActiveChatSettings();
   });
+}
+
+if (maxTokensInput) {
+  maxTokensInput.addEventListener('input', syncActiveChatSettings);
+}
+
+if (stopInput) {
+  stopInput.addEventListener('input', syncActiveChatSettings);
+}
+
+if (modeToggle) {
+  modeToggle.addEventListener('change', syncActiveChatSettings);
 }
 
 modelButton.addEventListener('click', () => {
@@ -753,8 +1130,137 @@ modeToggle.addEventListener('change', () => {
   modeState.textContent = modeToggle.checked ? 'Обычный' : 'JSON';
 });
 
+// ── Модальное окно ─────────────────────────────────────────────────────────
+modalCopy.addEventListener('click', async () => {
+  await copyToClipboard(modalResult.textContent || '');
+  const original = modalCopy.textContent;
+  modalCopy.textContent = 'Скопировано ✓';
+  setTimeout(() => {
+    modalCopy.textContent = original;
+  }, 1200);
+});
+
+function closeModalFromEvent() {
+  hideCommandModal();
+}
+
+modalClose.addEventListener('click', closeModalFromEvent);
+modalCloseBtn.addEventListener('click', closeModalFromEvent);
+commandModal.addEventListener('click', (e) => {
+  if (e.target === commandModal) closeModalFromEvent();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !commandModal.hidden) {
+    hideCommandModal();
+  }
+});
+
+// ── Инициализация ──────────────────────────────────────────────────────────
 autoResize();
 renderTotal();
 loadModels();
-const initialChat = createChat();
-activateChat(initialChat);
+
+async function restoreSessions() {
+  logClient('send', 'GET /api/sessions');
+  const res = await fetch('/api/sessions');
+  if (!res.ok) {
+    logClient('receive', 'GET /api/sessions → ' + res.status);
+    return { sessions: [], activeId: null };
+  }
+  const data = await res.json();
+  const sessions = Array.isArray(data.data) ? data.data : [];
+  const activeId = typeof data.active_id === 'string' ? data.active_id : null;
+  logClient('receive', 'GET /api/sessions → ' + sessions.length + ' сессий', data);
+  return { sessions, activeId };
+}
+
+function renderRestoredHistory(chat, session) {
+  const history = Array.isArray(session.history) ? session.history : [];
+  chat.history = history.map((m) => ({
+    role: m.role,
+    content: m.content,
+    meta: m.meta || null
+  }));
+
+  if (history.length === 0) {
+    addMessage(chat, 'assistant', chat.kind === 'summary'
+      ? 'Задайте вопрос с контекстом всех открытых чатов'
+      : 'Привет! Чем могу помочь?');
+    return;
+  }
+
+  let qaEl = null;
+  for (const m of history) {
+    if (m.role === 'user' || m.role === 'system') {
+      // system-запись — первое сообщение чата (системный промпт): рендерим как вопрос
+      qaEl = document.createElement('div');
+      qaEl.className = 'qa';
+      chat.messagesEl.appendChild(qaEl);
+      qaEl.appendChild(createMessageEl('user', m.content));
+    } else {
+      const el = createMessageEl('assistant', m.content);
+      (qaEl || chat.messagesEl).appendChild(el);
+      if (m.meta) renderQaStats(qaEl || chat.messagesEl, formatMetaLine(m.meta));
+      qaEl = null;
+    }
+  }
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+}
+
+function sessionTitle(session) {
+  if (session.kind === 'summary') return SUMMARY_CHAT_TITLE;
+  const firstMsg = (session.history || []).find((m) => m.role === 'user' || m.role === 'system');
+  return firstMsg ? firstMsg.content.replace(/\s+/g, ' ').trim() : 'Новый чат';
+}
+
+(async () => {
+  let restoredSessions = [];
+  let activeId = null;
+  try {
+    const restored = await restoreSessions();
+    restoredSessions = restored.sessions;
+    activeId = restored.activeId;
+  } catch (err) {
+    logClient('receive', 'GET /api/sessions — ошибка', err.message);
+  }
+
+  if (restoredSessions.length === 0) {
+    const initialChat = await createChat();
+    activateChat(initialChat);
+    return;
+  }
+
+  // Восстанавливаем все чаты как вкладки.
+  let mostRecent = null;
+  let mostRecentTs = -Infinity;
+  for (const session of restoredSessions) {
+    const chat = {
+      id: `chat-${++chatCounter}`,
+      sid: session.id,
+      title: sessionTitle(session),
+      history: [],
+      renamed: Boolean(session.history && session.history.length > 0),
+      kind: session.kind === 'summary' ? 'summary' : 'chat',
+      busy: false,
+      model: session.model || null,
+      settings: normalizeServerSettings(session.settings),
+      messagesEl: null
+    };
+    const messagesEl = document.createElement('div');
+    messagesEl.className = 'chat__messages';
+    messagesEl.hidden = true;
+    messagesRoot.appendChild(messagesEl);
+    chat.messagesEl = messagesEl;
+    chats.push(chat);
+    renderRestoredHistory(chat, session);
+    const ts = typeof session.last_active === 'number' ? session.last_active : 0;
+    if (ts > mostRecentTs) {
+      mostRecentTs = ts;
+      mostRecent = chat;
+    }
+  }
+  // Активируем вкладку, открытую у пользователя; иначе — самую свежую.
+  const activeChat = (activeId && chats.find((c) => c.sid === activeId)) || mostRecent || chats[0];
+  activateChat(activeChat);
+})();

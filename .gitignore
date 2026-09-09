@@ -1,4 +1,9 @@
-node_modules/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
 .env
+chats.db
+*.sqlite3
 npm-debug.log*
 .DS_Store

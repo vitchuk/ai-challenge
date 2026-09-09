@@ -20,12 +20,15 @@
       <main id="messages" class="chat__body"></main>
 
       <form id="form" class="chat__form">
-        <textarea
-          id="input"
-          class="chat__input"
-          rows="1"
-          placeholder="Напишите сообщение..."
-        ></textarea>
+        <div class="chat__input-wrap">
+          <div id="command-menu" class="command-menu" hidden></div>
+          <textarea
+            id="input"
+            class="chat__input"
+            rows="1"
+            placeholder="Напишите сообщение..."
+          ></textarea>
+        </div>
         <button id="send" type="submit" class="chat__send">Отправить</button>
       </form>
     </div>
@@ -118,6 +121,23 @@
         </div>
       </div>
     </aside>
+  </div>
+
+  <div id="command-modal" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Оптимизация промпта">
+      <div class="modal__header">
+        <span class="modal__title">Оптимизация промпта</span>
+        <button id="modal-close" type="button" class="modal__close" aria-label="Закрыть">×</button>
+      </div>
+      <div id="modal-body" class="modal__body">
+        <pre id="modal-result" class="modal__result"></pre>
+      </div>
+      <div id="modal-stats" class="modal__stats"></div>
+      <div class="modal__footer">
+        <button id="modal-copy" type="button" class="modal__copy">Копировать</button>
+        <button id="modal-close-btn" type="button" class="modal__close-btn">Закрыть</button>
+      </div>
+    </div>
   </div>
 
   <footer class="statusbar">
