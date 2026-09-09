@@ -12,21 +12,36 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.models import router as models_router
 from .api.sessions import router as sessions_router
-from .config import get_settings
+from .config import Settings, get_settings
 from .services.registry import SessionRegistry
+from .services.storage import SessionStore
 
 PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
 
 
+def build_registry(settings: Settings) -> SessionRegistry:
+    """Создаёт реестр сессий с SQLite-хранилищем и восстанавливает чаты.
+
+    Args:
+        settings: настройки сервера (путь к БД).
+
+    Returns:
+        Реестр с уже восстановленными из БД сессиями.
+    """
+    store = SessionStore(settings.chats_db_path)
+    registry = SessionRegistry(settings, store=store)
+    registry.restore()
+    return registry
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Управляет временем жизни общего HTTP-клиента и реестра сессий."""
+    """Управляет временем жизни HTTP-клиента, реестра и хранилища сессий."""
     app.state.http_client = httpx.AsyncClient()
-    app.state.registry = SessionRegistry(get_settings())
+    app.state.registry = build_registry(get_settings())
     app.state.opencode_session_id = str(uuid.uuid4())
-    await app.state.registry.start_cleanup()
     yield
-    await app.state.registry.stop_cleanup()
+    app.state.registry.close()
     await app.state.http_client.aclose()
 
 

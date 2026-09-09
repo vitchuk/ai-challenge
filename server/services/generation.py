@@ -52,6 +52,36 @@ class GenerationSettings:
             out["response_format"] = {"type": self.response_format["type"]}
         return out
 
+    def to_dict(self) -> dict[str, Any]:
+        """Представляет настройки как словарь (для персистентности/API).
+
+        ``None``-значения и пустой ``stop`` включаются как есть, чтобы
+        сохранить полное состояние настроек.
+        """
+        return {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "max_tokens": self.max_tokens,
+            "stop": list(self.stop),
+            "response_format": self.response_format,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "GenerationSettings":
+        """Восстанавливает настройки из словаря.
+
+        Args:
+            data: словарь настроек (например, загруженный из БД).
+
+        Returns:
+            Экземпляр :class:`GenerationSettings` (значения проходят
+            через :func:`sanitize_settings`).
+        """
+        if not isinstance(data, dict):
+            return cls()
+        return sanitize_settings(data)
+
 
 def _sanitize_temperature(value: Any) -> Optional[float]:
     if not isinstance(value, (int, float)) or isinstance(value, bool):

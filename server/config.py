@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     opencode_api_key: str | None = None
     port: int = 3000
-    session_ttl_hours: float = 12.0
+    chats_db_path: str = "chats.db"
 
 
 @lru_cache

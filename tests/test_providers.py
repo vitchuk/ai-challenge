@@ -28,6 +28,16 @@ def test_opencode_free():
     assert "/zen/v1/" in spec.endpoint
 
 
+def test_model_label_preserved():
+    # opencode-модель сохраняет клиентский id с префиксом (для метаданных/восстановления)
+    spec = resolve_provider("opencode/glm-5.3", None, "zen", "sess")
+    assert spec.model_label == "opencode/glm-5.3"
+    assert spec.model == "glm-5.3"
+    # deepseek — как есть
+    spec = resolve_provider("deepseek-v4-flash", "sk", None, "sess")
+    assert spec.model_label == "deepseek-v4-flash"
+
+
 def test_opencode_unsupported():
     with pytest.raises(UnsupportedModelError):
         resolve_provider("opencode/nope", None, "zen", "sess")

@@ -22,7 +22,7 @@ if exist ".env" (
 )
 
 rem Открываем браузер.
-start http://localhost:%PORT%
+rem start http://localhost:%PORT%
 
 rem Запускаем сервер (порт читается из .env внутри приложения).
 ".venv\Scripts\python.exe" -m server.main

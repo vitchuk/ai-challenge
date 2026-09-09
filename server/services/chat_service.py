@@ -54,6 +54,28 @@ class MessageMeta:
             "finish_reason": self.finish_reason,
         }
 
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> Optional["MessageMeta"]:
+        """Восстанавливает метаданные из словаря (из БД/API).
+
+        Args:
+            data: словарь метаданных (может быть ``None``).
+
+        Returns:
+            Экземпляр :class:`MessageMeta` или ``None``.
+        """
+        if not isinstance(data, dict):
+            return None
+        return cls(
+            model=data.get("model", ""),
+            elapsed_s=data.get("time_s", 0.0),
+            prompt_tokens=data.get("prompt_tokens"),
+            completion_tokens=data.get("completion_tokens"),
+            reasoning_tokens=data.get("reasoning_tokens"),
+            cost_usd=data.get("cost_usd"),
+            finish_reason=data.get("finish_reason"),
+        )
+
 
 @dataclass
 class MessageRecord:
@@ -65,6 +87,7 @@ class MessageRecord:
     role: str
     content: str
     meta: Optional[MessageMeta] = None
+    created_at: float = 0.0
 
     def to_dict(self) -> dict:
         """Представляет сообщение как словарь (для API)."""
@@ -72,6 +95,22 @@ class MessageRecord:
         if self.meta is not None:
             out["meta"] = self.meta.to_dict()
         return out
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MessageRecord":
+        """Восстанавливает сообщение из словаря (из БД/API).
+
+        Args:
+            data: словарь ``{"role", "content", "meta"?}``.
+
+        Returns:
+            Экземпляр :class:`MessageRecord`.
+        """
+        return cls(
+            role=data.get("role", "user"),
+            content=data.get("content", ""),
+            meta=MessageMeta.from_dict(data.get("meta")),
+        )
 
 
 class ChatService:
@@ -100,6 +139,7 @@ class ChatService:
         self.system_prompt = system_prompt
         self.history: list[MessageRecord] = []
         self.busy = False
+        self.created_at = time.time()
         self.last_active = time.time()
 
     def add_user_message(self, content: str) -> MessageRecord:
@@ -111,7 +151,7 @@ class ChatService:
         Returns:
             Добавленная запись :class:`MessageRecord`.
         """
-        record = MessageRecord(role="user", content=content)
+        record = MessageRecord(role="user", content=content, created_at=time.time())
         self.history.append(record)
         self.last_active = time.time()
         return record
@@ -126,24 +166,60 @@ class ChatService:
         Returns:
             Добавленная запись :class:`MessageRecord`.
         """
-        record = MessageRecord(role="assistant", content=content, meta=meta)
+        record = MessageRecord(
+            role="assistant",
+            content=content,
+            meta=meta,
+            created_at=time.time(),
+        )
+        self.history.append(record)
+        self.last_active = time.time()
+        return record
+
+    def seed_system_message(self, content: str) -> MessageRecord:
+        """Делает первое сообщение чата системным промптом.
+
+        Устанавливает ``system_prompt`` чата и добавляет запись истории
+        с ролью ``system`` (для отображения/восстановления). Первый запрос
+        к модели уходит как ``[system]``.
+
+        Args:
+            content: текст первого сообщения.
+
+        Returns:
+            Добавленная запись :class:`MessageRecord`.
+        """
+        self.system_prompt = content
+        record = MessageRecord(role="system", content=content, created_at=time.time())
         self.history.append(record)
         self.last_active = time.time()
         return record
 
     def rollback_user_message(self) -> None:
-        """Откатывает последнее пользовательское сообщение (при ошибке)."""
+        """Откатывает последнее пользовательское сообщение (при ошибке).
+
+        Если откатывается первое сообщение-сид (``system``-запись),
+        системный промпт чата также сбрасывается — повторная попытка
+        снова станет системным промптом.
+        """
         while self.history and self.history[-1].role == "user":
             self.history.pop()
+        if len(self.history) == 1 and self.history[-1].role == "system":
+            self.history.pop()
+            self.system_prompt = None
 
     def to_openai_messages(self) -> list[dict]:
         """Собирает массив сообщений OpenAI из системного промпта и истории.
+
+        Если первая запись истории — системный промпт (сид), он не
+        вставляется повторно (уже присутствует в истории). Иначе промпт
+        вставляется первым сообщением (summary/ephemeral).
 
         Returns:
             Список ``{"role", "content"}`` для запроса к апстриму.
         """
         messages: list[dict] = []
-        if self.system_prompt:
+        if self.system_prompt and not (self.history and self.history[0].role == "system"):
             messages.append({"role": "system", "content": self.system_prompt})
         for record in self.history:
             messages.append({"role": record.role, "content": record.content})
@@ -253,7 +329,9 @@ class ChatService:
                     if event.usage is not None:
                         usage = event.usage
 
-            meta = self.build_meta(spec.model, start_time, usage, finish_reason)
+            meta = self.build_meta(
+                spec.model_label or spec.model, start_time, usage, finish_reason
+            )
             self.append_assistant_message(full, meta)
             yield {
                 "type": "done",

@@ -77,6 +77,54 @@ async def create_session(
     return SessionCreateResponse(id=session.id, model=session.model)
 
 
+@router.get("")
+async def list_sessions(request: Request) -> dict:
+    """Возвращает все сессии с историей (для восстановления клиента).
+
+    Изолированные (ephemeral) сессии — временные и в список не включаются.
+
+    Args:
+        request: HTTP-запрос.
+
+    Returns:
+        ``{"data": [{id, kind, model, system_prompt, settings, last_active,
+        history}], "active_id": "…"|null}`` — активная сессия (открытая вкладка).
+    """
+    registry: SessionRegistry = request.app.state.registry
+    data = []
+    for session in registry.list_sessions():
+        if session.kind == SessionKind.EPHEMERAL:
+            continue
+        data.append(
+            {
+                "id": session.id,
+                "kind": session.kind.value,
+                "model": session.model,
+                "system_prompt": session.system_prompt,
+                "settings": session.settings.to_dict(),
+                "last_active": session.last_active,
+                "history": [m.to_dict() for m in session.history],
+            }
+        )
+    return {"data": data, "active_id": registry.get_active()}
+
+
+@router.post("/{session_id}/activate", status_code=204)
+async def activate_session(session_id: str, request: Request) -> None:
+    """Отмечает сессию как активную (открытую вкладку пользователя).
+
+    Используется клиентом при переключении вкладок, чтобы восстановить
+    именно открытый чат после перезапуска сервера/перезагрузки страницы.
+
+    Args:
+        session_id: идентификатор сессии.
+        request: HTTP-запрос.
+    """
+    registry: SessionRegistry = request.app.state.registry
+    if not registry.set_active(session_id):
+        raise HTTPException(404, "Session not found")
+
+
 @router.get("/{session_id}")
 async def get_session(session_id: str, request: Request) -> dict:
     """Возвращает полное состояние сессии (история с метаданными).
@@ -97,6 +145,8 @@ async def get_session(session_id: str, request: Request) -> dict:
         "kind": session.kind.value,
         "model": session.model,
         "system_prompt": session.system_prompt,
+        "settings": session.settings.to_dict(),
+        "last_active": session.last_active,
         "history": [m.to_dict() for m in session.history],
     }
 
@@ -136,12 +186,23 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
 
     opencode_session_id = request.app.state.opencode_session_id
     spec = _resolve_spec(registry, session, body.model, opencode_session_id)
-    gen_settings = sanitize_settings(body.settings)
-    if body.settings is None:
-        # используем настройки сессии, если запрос ничего не переопределил
-        gen_settings = session.settings
+    # Запоминаем модель, с которой было обращение к этому чату.
+    if body.model:
+        session.model = body.model
+    # Настройки запроса инкапсулируются за чатом (если присланы).
+    if body.settings is not None:
+        session.settings = sanitize_settings(body.settings)
+    gen_settings = session.settings
 
-    session.add_user_message(body.content)
+    # Первое сообщение обычного чата становится системным промптом.
+    if (
+        session.kind == SessionKind.CHAT
+        and not session.history
+        and session.system_prompt is None
+    ):
+        session.seed_system_message(body.content)
+    else:
+        session.add_user_message(body.content)
 
     # Для чата «Итоги» собираем актуальный TOON-контекст на каждый запрос.
     if session.kind == SessionKind.SUMMARY:
@@ -156,6 +217,8 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
                 runner, spec, gen_settings, extra_system=body.system_prompt
             ):
                 yield _sse(event)
+            # Успешное завершение: сохраняем пару user+assistant в БД.
+            registry.remember_pair(session)
         except Exception as exc:  # noqa: BLE001 - отдаём ошибку клиенту как событие
             session.rollback_user_message()
             yield _sse({"type": "error", "error": str(exc)})

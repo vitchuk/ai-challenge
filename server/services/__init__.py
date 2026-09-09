@@ -3,6 +3,7 @@
 from .chat_service import ChatService, MessageMeta, MessageRecord, SessionKind
 from .generation import GenerationSettings, sanitize_settings
 from .registry import SessionRegistry
+from .storage import SessionStore
 
 __all__ = [
     "ChatService",
@@ -11,5 +12,6 @@ __all__ = [
     "MessageRecord",
     "SessionKind",
     "SessionRegistry",
+    "SessionStore",
     "sanitize_settings",
 ]

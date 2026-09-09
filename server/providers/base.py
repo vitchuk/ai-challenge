@@ -64,6 +64,7 @@ class ProviderSpec:
     model: str
     provider_name: str
     headers: dict[str, str] = field(default_factory=dict)
+    model_label: str = ""
 
 
 class LLMProvider(abc.ABC):

@@ -95,6 +95,7 @@ def resolve_provider(
             api_key=opencode_api_key,
             model=inner,
             provider_name="OpenCode",
+            model_label=model,
             headers={
                 "x-opencode-session": session_id,
                 "User-Agent": USER_AGENT,
@@ -108,6 +109,7 @@ def resolve_provider(
         api_key=deepseek_api_key,
         model=model,
         provider_name="DeepSeek",
+        model_label=model,
         headers={"User-Agent": USER_AGENT},
     )
 

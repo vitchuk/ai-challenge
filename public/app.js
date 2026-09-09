@@ -118,6 +118,50 @@ function resetGenerationDefaults() {
   }
 }
 
+function resetChatPanel() {
+  resetGenerationDefaults();
+  if (maxTokensInput) maxTokensInput.value = '';
+  if (stopInput) stopInput.value = '';
+}
+
+function defaultChatSettings() {
+  return {
+    temperature: 1,
+    top_p: 1,
+    max_tokens: null,
+    stop: [],
+    response_format: null
+  };
+}
+
+function normalizeServerSettings(s) {
+  const def = defaultChatSettings();
+  if (!s || typeof s !== 'object') return def;
+  return {
+    temperature: typeof s.temperature === 'number' ? s.temperature : def.temperature,
+    top_p: typeof s.top_p === 'number' ? s.top_p : def.top_p,
+    max_tokens: s.max_tokens || null,
+    stop: Array.isArray(s.stop) ? s.stop : [],
+    response_format: s.response_format || null
+  };
+}
+
+function applyChatSettings(chat) {
+  const s = chat.settings || defaultChatSettings();
+  if (tempRange) {
+    const t = typeof s.temperature === 'number' ? s.temperature : 1;
+    tempRange.value = String(t);
+    tempValue.textContent = String(t);
+  }
+  if (topPRange) {
+    const p = typeof s.top_p === 'number' ? s.top_p : 1;
+    topPRange.value = String(p);
+    topPValue.textContent = String(p);
+  }
+  if (maxTokensInput) maxTokensInput.value = s.max_tokens ? String(s.max_tokens) : '';
+  if (stopInput) stopInput.value = Array.isArray(s.stop) ? s.stop.join(', ') : '';
+}
+
 function displayName(id) {
   return id.startsWith('opencode/') ? id.slice('opencode/'.length) : id;
 }
@@ -160,14 +204,15 @@ function formatMetaLine(meta) {
   return { time, input, output, reasoning, cost, model };
 }
 
-function setSelectedModel(id) {
+function setSelectedModel(id, opts) {
+  const resetParams = !opts || opts.resetParams !== false;
   selectedModel = id;
   const out = modelPrice(id);
   const tier = priceTier(out);
   modelDot.className = 'dropdown__dot' + (tier ? ` dropdown__dot--${tier}` : '');
   modelLabel.textContent = displayName(id);
   modelLabel.title = `${displayName(id)}${out > 0 ? ` — output: $${out}/1M токенов` : ''}`;
-  resetGenerationDefaults();
+  if (resetParams) resetGenerationDefaults();
 }
 
 function renderModelMenu(models) {
@@ -223,6 +268,9 @@ function renderModelMenu(models) {
         setSelectedModel(m.id);
         renderModelMenu(models);
         closeModelMenu();
+        // запоминаем выбранную модель в активном чате
+        const chat = getActiveChat();
+        if (chat) chat.model = m.id;
       });
       modelMenu.appendChild(item);
     }
@@ -274,15 +322,17 @@ function loadModels() {
       if (models.length === 0) throw new Error('empty model list');
       cachedModels = models;
       renderModelMenu(models);
-      const preferred = models.some((m) => m.id === FALLBACK_MODELS[0].id)
-        ? FALLBACK_MODELS[0].id
-        : models[0].id;
-      setSelectedModel(preferred);
+      if (selectedModel === null) {
+        const preferred = models.some((m) => m.id === FALLBACK_MODELS[0].id)
+          ? FALLBACK_MODELS[0].id
+          : models[0].id;
+        setSelectedModel(preferred);
+      }
     })
     .catch(() => {
       cachedModels = FALLBACK_MODELS.map((m) => ({ ...m, price: -1 }));
       renderModelMenu(FALLBACK_MODELS);
-      setSelectedModel(FALLBACK_MODELS[0].id);
+      if (selectedModel === null) setSelectedModel(FALLBACK_MODELS[0].id);
     });
 }
 
@@ -313,6 +363,16 @@ async function apiDeleteSession(sid) {
   logClient('receive', `DELETE /api/sessions/${sid} → ${res.status}`);
 }
 
+async function apiActivateSession(sid) {
+  logClient('send', `POST /api/sessions/${sid}/activate`);
+  const res = await fetch(`/api/sessions/${sid}/activate`, { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Ошибка ${res.status}`);
+  }
+  logClient('receive', `POST /api/sessions/${sid}/activate → ${res.status}`);
+}
+
 // ── Чат-сессии ─────────────────────────────────────────────────────────────
 function getActiveChat() {
   return chats.find((c) => c.id === activeChatId) || null;
@@ -332,8 +392,15 @@ async function createChat(kind = 'chat', title = 'Новый чат') {
     renamed: false,
     kind,
     busy: false,
+    model: null,
+    settings: defaultChatSettings(),
     messagesEl: null
   };
+
+  // Новый чат: параметры и модель сбрасываются к дефолту (deepseek-v4-flash).
+  setSelectedModel(FALLBACK_MODELS[0].id);
+  resetChatPanel();
+  if (cachedModels) renderModelMenu(cachedModels);
 
   const messagesEl = document.createElement('div');
   messagesEl.className = 'chat__messages';
@@ -396,6 +463,17 @@ function activateChat(chat) {
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
   renderTabs();
   updateSendButton();
+  // Восстанавливаем модель вкладки (без сброса параметров генерации).
+  setSelectedModel(chat.model || FALLBACK_MODELS[0].id, { resetParams: false });
+  if (cachedModels) renderModelMenu(cachedModels);
+  // Восстанавливаем инкапсулированные настройки чата в панель.
+  applyChatSettings(chat);
+  // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
+  if (chat.sid) {
+    apiActivateSession(chat.sid).catch((err) => {
+      logClient('receive', 'POST activate — ошибка', err.message);
+    });
+  }
 }
 
 async function closeChat(chat) {
@@ -1000,16 +1078,35 @@ tabsListEl.addEventListener('click', (e) => {
   }
 });
 
+function syncActiveChatSettings() {
+  const chat = getActiveChat();
+  if (chat) chat.settings = collectSettings();
+}
+
 if (tempRange) {
   tempRange.addEventListener('input', () => {
     tempValue.textContent = tempRange.value;
+    syncActiveChatSettings();
   });
 }
 
 if (topPRange) {
   topPRange.addEventListener('input', () => {
     topPValue.textContent = topPRange.value;
+    syncActiveChatSettings();
   });
+}
+
+if (maxTokensInput) {
+  maxTokensInput.addEventListener('input', syncActiveChatSettings);
+}
+
+if (stopInput) {
+  stopInput.addEventListener('input', syncActiveChatSettings);
+}
+
+if (modeToggle) {
+  modeToggle.addEventListener('change', syncActiveChatSettings);
 }
 
 modelButton.addEventListener('click', () => {
@@ -1063,7 +1160,107 @@ document.addEventListener('keydown', (e) => {
 autoResize();
 renderTotal();
 loadModels();
+
+async function restoreSessions() {
+  logClient('send', 'GET /api/sessions');
+  const res = await fetch('/api/sessions');
+  if (!res.ok) {
+    logClient('receive', 'GET /api/sessions → ' + res.status);
+    return { sessions: [], activeId: null };
+  }
+  const data = await res.json();
+  const sessions = Array.isArray(data.data) ? data.data : [];
+  const activeId = typeof data.active_id === 'string' ? data.active_id : null;
+  logClient('receive', 'GET /api/sessions → ' + sessions.length + ' сессий', data);
+  return { sessions, activeId };
+}
+
+function renderRestoredHistory(chat, session) {
+  const history = Array.isArray(session.history) ? session.history : [];
+  chat.history = history.map((m) => ({
+    role: m.role,
+    content: m.content,
+    meta: m.meta || null
+  }));
+
+  if (history.length === 0) {
+    addMessage(chat, 'assistant', chat.kind === 'summary'
+      ? 'Задайте вопрос с контекстом всех открытых чатов'
+      : 'Привет! Чем могу помочь?');
+    return;
+  }
+
+  let qaEl = null;
+  for (const m of history) {
+    if (m.role === 'user' || m.role === 'system') {
+      // system-запись — первое сообщение чата (системный промпт): рендерим как вопрос
+      qaEl = document.createElement('div');
+      qaEl.className = 'qa';
+      chat.messagesEl.appendChild(qaEl);
+      qaEl.appendChild(createMessageEl('user', m.content));
+    } else {
+      const el = createMessageEl('assistant', m.content);
+      (qaEl || chat.messagesEl).appendChild(el);
+      if (m.meta) renderQaStats(qaEl || chat.messagesEl, formatMetaLine(m.meta));
+      qaEl = null;
+    }
+  }
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+}
+
+function sessionTitle(session) {
+  if (session.kind === 'summary') return SUMMARY_CHAT_TITLE;
+  const firstMsg = (session.history || []).find((m) => m.role === 'user' || m.role === 'system');
+  return firstMsg ? firstMsg.content.replace(/\s+/g, ' ').trim() : 'Новый чат';
+}
+
 (async () => {
-  const initialChat = await createChat();
-  activateChat(initialChat);
+  let restoredSessions = [];
+  let activeId = null;
+  try {
+    const restored = await restoreSessions();
+    restoredSessions = restored.sessions;
+    activeId = restored.activeId;
+  } catch (err) {
+    logClient('receive', 'GET /api/sessions — ошибка', err.message);
+  }
+
+  if (restoredSessions.length === 0) {
+    const initialChat = await createChat();
+    activateChat(initialChat);
+    return;
+  }
+
+  // Восстанавливаем все чаты как вкладки.
+  let mostRecent = null;
+  let mostRecentTs = -Infinity;
+  for (const session of restoredSessions) {
+    const chat = {
+      id: `chat-${++chatCounter}`,
+      sid: session.id,
+      title: sessionTitle(session),
+      history: [],
+      renamed: Boolean(session.history && session.history.length > 0),
+      kind: session.kind === 'summary' ? 'summary' : 'chat',
+      busy: false,
+      model: session.model || null,
+      settings: normalizeServerSettings(session.settings),
+      messagesEl: null
+    };
+    const messagesEl = document.createElement('div');
+    messagesEl.className = 'chat__messages';
+    messagesEl.hidden = true;
+    messagesRoot.appendChild(messagesEl);
+    chat.messagesEl = messagesEl;
+    chats.push(chat);
+    renderRestoredHistory(chat, session);
+    const ts = typeof session.last_active === 'number' ? session.last_active : 0;
+    if (ts > mostRecentTs) {
+      mostRecentTs = ts;
+      mostRecent = chat;
+    }
+  }
+  // Активируем вкладку, открытую у пользователя; иначе — самую свежую.
+  const activeChat = (activeId && chats.find((c) => c.sid === activeId)) || mostRecent || chats[0];
+  activateChat(activeChat);
 })();

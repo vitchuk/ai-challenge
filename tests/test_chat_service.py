@@ -3,7 +3,7 @@
 import pytest
 
 from server.pricing import message_cost
-from server.services.chat_service import ChatService, SessionKind
+from server.services.chat_service import ChatService, MessageMeta, SessionKind
 from server.services.generation import GenerationSettings
 
 
@@ -51,7 +51,7 @@ def test_stream_completion_records_meta_and_events():
     svc = ChatService("c1", model="deepseek-chat")
     svc.add_user_message("вопрос")
     runner = FakeRunner(make_events())
-    spec = type("Spec", (), {"model": "deepseek-chat"})()
+    spec = type("Spec", (), {"model": "deepseek-chat", "model_label": "deepseek-chat"})()
 
     events = []
     async def consume():
@@ -83,7 +83,7 @@ def test_stream_completion_sends_system_prompt_and_history():
     svc = ChatService("c1", model="m", system_prompt="sys", settings=GenerationSettings())
     svc.add_user_message("q")
     runner = FakeRunner([])
-    spec = type("Spec", (), {"model": "m"})()
+    spec = type("Spec", (), {"model": "m", "model_label": "opencode/m"})()
     asyncio_run(consume_stream(svc, runner, spec))
     assert runner.seen_messages == [
         {"role": "system", "content": "sys"},
@@ -95,7 +95,7 @@ def test_stream_completion_prepends_extra_system():
     svc = ChatService("c1", model="m", system_prompt="sys", settings=GenerationSettings())
     svc.add_user_message("q")
     runner = FakeRunner([])
-    spec = type("Spec", (), {"model": "m"})()
+    spec = type("Spec", (), {"model": "m", "model_label": "opencode/m"})()
     asyncio_run(consume_stream(svc, runner, spec, extra_system="JSON"))
     assert runner.seen_messages[0] == {"role": "system", "content": "JSON"}
 
@@ -130,6 +130,45 @@ def test_to_toon_context_roundtrip():
     assert decoded["title"] == "Чат 1"
     assert len(decoded["messages"]) == 2
     assert decoded["messages"][1]["meta"]["completion_tokens"] == 5
+
+
+def test_seed_system_message():
+    svc = ChatService("c1")
+    svc.seed_system_message("Ты — переводчик")
+    assert svc.system_prompt == "Ты — переводчик"
+    assert svc.history[0].role == "system"
+    # первый запрос уходит как [system] без дубля
+    assert svc.to_openai_messages() == [{"role": "system", "content": "Ты — переводчик"}]
+
+
+def test_seed_then_conversation_no_duplicate_system():
+    svc = ChatService("c1")
+    svc.seed_system_message("инструкция")
+    svc.append_assistant_message("ок", MessageMeta(model="m", elapsed_s=1))
+    svc.add_user_message("вопрос")
+    assert svc.to_openai_messages() == [
+        {"role": "system", "content": "инструкция"},
+        {"role": "assistant", "content": "ок"},
+        {"role": "user", "content": "вопрос"},
+    ]
+
+
+def test_rollback_seed_clears_system_prompt():
+    svc = ChatService("c1")
+    svc.seed_system_message("инструкция")
+    svc.rollback_user_message()
+    assert svc.history == []
+    assert svc.system_prompt is None
+
+
+def test_rollback_user_keeps_seed():
+    svc = ChatService("c1")
+    svc.seed_system_message("инструкция")
+    svc.append_assistant_message("ок", MessageMeta(model="m", elapsed_s=1))
+    svc.add_user_message("вопрос")
+    svc.rollback_user_message()
+    assert [m.role for m in svc.history] == ["system", "assistant"]
+    assert svc.system_prompt == "инструкция"
 
 
 def asyncio_run(coro):
