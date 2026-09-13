@@ -88,6 +88,7 @@ async def app(monkeypatch) -> FastAPI:
     application = create_app()
     transport = MockTransport(make_chat_chunks(content="Ответ", usage=USAGE))
     application.state.http_client = httpx.AsyncClient(transport=transport)
+    application.state.mock_transport = transport
     application.state.opencode_session_id = "test-session"
     application.state.registry = SessionRegistry(config.get_settings())
     yield application

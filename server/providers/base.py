@@ -47,12 +47,27 @@ class ChatEvent:
 
 
 class ProviderError(Exception):
-    """Ошибка апстрима (передаётся клиенту с кодом HTTP)."""
+    """Ошибка апстрима (передаётся клиенту с кодом HTTP).
 
-    def __init__(self, status: int, message: str) -> None:
+    Args:
+        status: HTTP-статус ошибки.
+        message: человекочитаемое сообщение.
+        code: машинный код (например, ``context_length_exceeded``).
+        details: дополнительные данные (например, лимит контекста).
+    """
+
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        code: Optional[str] = None,
+        details: Optional[dict] = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        self.code = code
+        self.details = details or {}
 
 
 @dataclass

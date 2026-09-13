@@ -312,6 +312,49 @@ body {
   animation: reasoning-spin 0.8s linear infinite;
 }
 
+.message--context-limit {
+  align-self: stretch;
+  max-width: 100%;
+  background: rgba(255, 193, 7, 0.08);
+  border: 1px solid rgba(255, 193, 7, 0.5);
+}
+
+.message__limit-icon {
+  font-size: 18px;
+  line-height: 1;
+  margin-bottom: 6px;
+  color: #ffc107;
+}
+
+.message__limit-text {
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.message__limit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.message__limit-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.message__limit-btn:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(79, 140, 255, 0.25);
+}
+
 @keyframes reasoning-spin {
   to {
     transform: rotate(360deg);
@@ -382,6 +425,41 @@ body {
   gap: 10px;
   padding: 14px 20px;
   border-top: 1px solid var(--border);
+}
+
+.chat-info {
+  flex: none;
+  width: 100%;
+  padding: 7px 20px;
+  border-top: 1px solid var(--border);
+  background: rgba(15, 17, 21, 0.7);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  /* Если не вмещается в одну строку — переносится максимум на две. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.chat-info__ctx--warn {
+  color: #ffc107;
+}
+
+.chat-info__ctx--crit {
+  color: #ef5350;
+}
+
+/* Привязываемые параметры (модель, temperature, top_p, top_k) блокируются
+   после первого сообщения чата — значения остаются видимыми, но неактивны. */
+.dropdown__button:disabled,
+.settings__range:disabled,
+.settings__input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .chat__input-wrap {

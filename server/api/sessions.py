@@ -10,12 +10,41 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ..providers import UnsupportedModelError, resolve_provider
+from ..providers.base import ProviderError
 from ..providers.client import StreamedCompletion
 from ..schemas import MessageCreateRequest, SessionCreateRequest, SessionCreateResponse
 from ..services import ChatService, SessionKind, sanitize_settings
 from ..services.registry import SessionRegistry
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+
+def _thousands(n: int) -> str:
+    """Форматирует число с пробелами-разделителями тысяч."""
+    return f"{n:,}".replace(",", " ")
+
+
+def _provider_error_event(exc: ProviderError, session: ChatService) -> dict:
+    """Формирует SSE-событие ошибки провайдера.
+
+    Для ошибки лимита контекста возвращает локализованное сообщение и
+    машинный ``code`` (клиент показывает спец-блок с действиями).
+    """
+    if exc.code == "context_length_exceeded":
+        max_ctx = exc.details.get("max_context")
+        requested = exc.details.get("requested")
+        parts = []
+        if max_ctx is not None:
+            parts.append(f"макс. {_thousands(max_ctx)} токенов")
+        if requested is not None:
+            parts.append(f"запрос {_thousands(requested)} токенов")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        msg = (
+            f"Лимит контекста модели достигнут{detail}. История чата слишком "
+            "большая — начните новый чат или сожмите контекст («Подвести итоги»)."
+        )
+        return {"type": "error", "error": msg, "code": exc.code}
+    return {"type": "error", "error": str(exc)}
 
 
 def _sse(event: dict) -> str:
@@ -186,12 +215,20 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
 
     opencode_session_id = request.app.state.opencode_session_id
     spec = _resolve_spec(registry, session, body.model, opencode_session_id)
-    # Запоминаем модель, с которой было обращение к этому чату.
-    if body.model:
+    first_message = not session.history
+    # Модель и «привязываемые» параметры (temperature/top_p/top_k) фиксируются
+    # первым сообщением чата; далее изменения игнорируются.
+    if body.model and first_message:
         session.model = body.model
-    # Настройки запроса инкапсулируются за чатом (если присланы).
     if body.settings is not None:
-        session.settings = sanitize_settings(body.settings)
+        incoming = sanitize_settings(body.settings)
+        if first_message:
+            session.settings = incoming
+        else:
+            # «Гибкие» параметры можно менять на лету, привязываемые — нет.
+            session.settings.max_tokens = incoming.max_tokens
+            session.settings.stop = incoming.stop
+            session.settings.response_format = incoming.response_format
     gen_settings = session.settings
 
     # Первое сообщение обычного чата становится системным промптом.
@@ -219,6 +256,9 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
                 yield _sse(event)
             # Успешное завершение: сохраняем пару user+assistant в БД.
             registry.remember_pair(session)
+        except ProviderError as exc:
+            session.rollback_user_message()
+            yield _sse(_provider_error_event(exc, session))
         except Exception as exc:  # noqa: BLE001 - отдаём ошибку клиенту как событие
             session.rollback_user_message()
             yield _sse({"type": "error", "error": str(exc)})

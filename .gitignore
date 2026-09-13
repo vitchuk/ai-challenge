@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
-chats.db
+chats.db*
 *.sqlite3
 npm-debug.log*
 .DS_Store

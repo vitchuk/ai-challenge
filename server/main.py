@@ -37,7 +37,9 @@ def build_registry(settings: Settings) -> SessionRegistry:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Управляет временем жизни HTTP-клиента, реестра и хранилища сессий."""
-    app.state.http_client = httpx.AsyncClient()
+    # Большие запросы (длинный контекст) и длинная генерация не должны
+    # упираться в дефолтный 5-секундный таймаут httpx.
+    app.state.http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0))
     app.state.registry = build_registry(get_settings())
     app.state.opencode_session_id = str(uuid.uuid4())
     yield
@@ -52,6 +54,20 @@ def create_app() -> FastAPI:
         Сконфигурированное приложение (маршруты API + раздача статики).
     """
     app = FastAPI(title="Помогатор2К", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def no_cache_static(request, call_next):
+        """Принудительная ревалидация статики (HTML/JS/CSS) у браузера.
+
+        Иначе браузер может держать устаревшие версии index.html/app.js
+        (например, без инфоблока ``.chat-info``).
+        """
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith((".html", ".js", ".css")):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     app.include_router(sessions_router)
     app.include_router(models_router)
     app.mount("/", StaticFiles(directory=PUBLIC_DIR, html=True), name="static")

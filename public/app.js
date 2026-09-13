@@ -12,6 +12,7 @@ const tempRange = document.getElementById('setting-temperature');
 const tempValue = document.getElementById('temperature-value');
 const topPRange = document.getElementById('setting-top-p');
 const topPValue = document.getElementById('top-p-value');
+const topKInput = document.getElementById('setting-top-k');
 const maxTokensInput = document.getElementById('setting-max-tokens');
 const stopInput = document.getElementById('setting-stop');
 const modeToggle = document.getElementById('setting-mode');
@@ -19,6 +20,7 @@ const modeState = document.getElementById('mode-state');
 const newChatBtn = document.getElementById('new-chat');
 const summarizeBtn = document.getElementById('summarize');
 const tabsListEl = document.getElementById('tabs-list');
+const chatInfoEl = document.getElementById('chat-info');
 const commandMenu = document.getElementById('command-menu');
 const commandModal = document.getElementById('command-modal');
 const modalBody = document.getElementById('modal-body');
@@ -67,6 +69,24 @@ const FALLBACK_MODELS = [
 const TIER_CHEAP_MAX = 1;
 const TIER_MEDIUM_MAX = 4;
 
+// Запасная карта контекстов (на случай, если модель не в списке /api/models
+// или её лимит не раскрыт апстримом). Значения подтверждены probe-запросами.
+const MODEL_CONTEXT = {
+  'deepseek-flash': 1048576,
+  'deepseek-v4-flash': 1048576,
+  'deepseek-v4-flash-vision-exp': 1048576,
+  'deepseek-v4-pro': 1048576,
+  'deepseek-chat': 1048576,
+  'deepseek-reasoner': 1048576,
+  'opencode/deepseek-v4-flash': 1048576,
+  'opencode/deepseek-v4-flash-vision-exp': 1048576,
+  'opencode/deepseek-v4-pro': 1048576,
+  'opencode/kimi-k2.6': 262144,
+  'opencode/longcat-2.0': 1048580,
+  'opencode/hy4-preview': 1048576,
+  'opencode/hy3': 262144
+};
+
 const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в формате JSON.';
 const SUMMARY_CHAT_TITLE = 'Подвести итоги';
 
@@ -91,6 +111,8 @@ function collectSettings() {
   let topP = Number(topPRange.value);
   if (topP === 0) topP = 0.01;
   settings.top_p = topP;
+  const topK = parseInt(topKInput.value, 10);
+  if (Number.isInteger(topK) && topK > 0) settings.top_k = topK;
   const maxTokens = parseInt(maxTokensInput.value, 10);
   if (Number.isInteger(maxTokens) && maxTokens > 0) settings.max_tokens = maxTokens;
   const stop = stopInput.value
@@ -120,6 +142,7 @@ function resetGenerationDefaults() {
 
 function resetChatPanel() {
   resetGenerationDefaults();
+  if (topKInput) topKInput.value = '';
   if (maxTokensInput) maxTokensInput.value = '';
   if (stopInput) stopInput.value = '';
 }
@@ -128,6 +151,7 @@ function defaultChatSettings() {
   return {
     temperature: 1,
     top_p: 1,
+    top_k: null,
     max_tokens: null,
     stop: [],
     response_format: null
@@ -140,6 +164,7 @@ function normalizeServerSettings(s) {
   return {
     temperature: typeof s.temperature === 'number' ? s.temperature : def.temperature,
     top_p: typeof s.top_p === 'number' ? s.top_p : def.top_p,
+    top_k: s.top_k || null,
     max_tokens: s.max_tokens || null,
     stop: Array.isArray(s.stop) ? s.stop : [],
     response_format: s.response_format || null
@@ -154,12 +179,108 @@ function applyChatSettings(chat) {
     tempValue.textContent = String(t);
   }
   if (topPRange) {
-    const p = typeof s.top_p === 'number' ? s.top_p : 1;
+    // Ползунок не допускает 0; защищаемся от легаси-значений.
+    const p = Math.max(0.01, typeof s.top_p === 'number' ? s.top_p : 1);
     topPRange.value = String(p);
     topPValue.textContent = String(p);
   }
+  if (topKInput) topKInput.value = s.top_k ? String(s.top_k) : '';
   if (maxTokensInput) maxTokensInput.value = s.max_tokens ? String(s.max_tokens) : '';
   if (stopInput) stopInput.value = Array.isArray(s.stop) ? s.stop.join(', ') : '';
+}
+
+function isEstablished(chat) {
+  return Boolean(chat && chat.history && chat.history.length > 0);
+}
+
+function updateSettingsLock() {
+  const chat = getActiveChat();
+  const locked = isEstablished(chat);
+  // Привязываемые первым сообщением контролы: модель, temperature, top_p, top_k.
+  for (const el of [modelButton, tempRange, topPRange, topKInput]) {
+    if (el) el.disabled = locked;
+  }
+  if (modelDropdown) modelDropdown.dataset.locked = locked ? 'true' : 'false';
+  if (locked) closeModelMenu();
+}
+
+function formatContext(n) {
+  if (typeof n !== 'number' || n <= 0) return '—';
+  if (n >= 1000000) return `${Math.round(n / 1000000)}M`;
+  return `${Math.round(n / 1000)}K`;
+}
+
+function chatTokens(chat) {
+  let sum = 0;
+  for (const m of chat && chat.history ? chat.history : []) {
+    if (m.meta) {
+      sum += (m.meta.prompt_tokens || 0) + (m.meta.completion_tokens || 0);
+    }
+  }
+  return sum;
+}
+
+function chatCost(chat) {
+  let sum = 0;
+  let any = false;
+  for (const m of chat && chat.history ? chat.history : []) {
+    if (m.meta && typeof m.meta.cost_usd === 'number') {
+      sum += m.meta.cost_usd;
+      any = true;
+    }
+  }
+  return any ? sum : null;
+}
+
+function modelContext(modelId) {
+  const m = (cachedModels || []).find((x) => x.id === modelId);
+  if (m && typeof m.context === 'number') return m.context;
+  return MODEL_CONTEXT[modelId] || null;
+}
+
+function lastPromptTokens(chat) {
+  if (!chat || !chat.history) return null;
+  for (let i = chat.history.length - 1; i >= 0; i--) {
+    const m = chat.history[i];
+    if (m.meta && typeof m.meta.prompt_tokens === 'number') return m.meta.prompt_tokens;
+  }
+  return null;
+}
+
+function renderChatInfo() {
+  if (!chatInfoEl) return;
+  const chat = getActiveChat();
+  const model = (chat && chat.model) || currentModel();
+  const s = (chat && chat.settings) || defaultChatSettings();
+  const temp = typeof s.temperature === 'number' ? s.temperature : 1;
+  const topP = typeof s.top_p === 'number' ? s.top_p : 1;
+  const topK = s.top_k != null ? s.top_k : '—';
+  const tokens = chatTokens(chat);
+  const ctxValue = modelContext(model);
+  const ctx = formatContext(ctxValue);
+  chatInfoEl.textContent =
+    `${displayName(model)} · temperature ${temp} · top_p ${topP} · top_k ${topK} · токенов: ${tokens} — ${ctx}`;
+
+  // Индикатор использования контекста (по последнему запросу): <80% обычно,
+  // ≥80% жёлтый, ≥95% красный.
+  const lastPrompt = lastPromptTokens(chat);
+  if (lastPrompt != null && typeof ctxValue === 'number' && ctxValue > 0) {
+    const pct = Math.round((lastPrompt / ctxValue) * 100);
+    const span = document.createElement('span');
+    span.className = 'chat-info__ctx';
+    if (pct >= 95) span.classList.add('chat-info__ctx--crit');
+    else if (pct >= 80) span.classList.add('chat-info__ctx--warn');
+    span.textContent = ` · контекст: ${pct}%`;
+    chatInfoEl.appendChild(span);
+  }
+
+  // Общая стоимость разговора в этом чате (сумма cost_usd по ответам).
+  const cost = chatCost(chat);
+  const costSpan = document.createElement('span');
+  costSpan.className = 'chat-info__cost';
+  costSpan.textContent =
+    ` · Общая стоимость: ${cost === null ? '—' : '$' + formatCost(cost)}`;
+  chatInfoEl.appendChild(costSpan);
 }
 
 function displayName(id) {
@@ -271,6 +392,7 @@ function renderModelMenu(models) {
         // запоминаем выбранную модель в активном чате
         const chat = getActiveChat();
         if (chat) chat.model = m.id;
+        renderChatInfo();
       });
       modelMenu.appendChild(item);
     }
@@ -317,7 +439,8 @@ function loadModels() {
         .map((m) => ({
           id: m.id,
           owned_by: typeof m.owned_by === 'string' ? m.owned_by : '',
-          price: typeof m.price === 'number' ? m.price : -1
+          price: typeof m.price === 'number' ? m.price : -1,
+          context: typeof m.context === 'number' ? m.context : null
         }));
       if (models.length === 0) throw new Error('empty model list');
       cachedModels = models;
@@ -328,11 +451,13 @@ function loadModels() {
           : models[0].id;
         setSelectedModel(preferred);
       }
+      renderChatInfo();
     })
     .catch(() => {
-      cachedModels = FALLBACK_MODELS.map((m) => ({ ...m, price: -1 }));
+      cachedModels = FALLBACK_MODELS.map((m) => ({ ...m, price: -1, context: null }));
       renderModelMenu(FALLBACK_MODELS);
       if (selectedModel === null) setSelectedModel(FALLBACK_MODELS[0].id);
+      renderChatInfo();
     });
 }
 
@@ -401,6 +526,8 @@ async function createChat(kind = 'chat', title = 'Новый чат') {
   setSelectedModel(FALLBACK_MODELS[0].id);
   resetChatPanel();
   if (cachedModels) renderModelMenu(cachedModels);
+  updateSettingsLock();
+  renderChatInfo();
 
   const messagesEl = document.createElement('div');
   messagesEl.className = 'chat__messages';
@@ -468,6 +595,8 @@ function activateChat(chat) {
   if (cachedModels) renderModelMenu(cachedModels);
   // Восстанавливаем инкапсулированные настройки чата в панель.
   applyChatSettings(chat);
+  updateSettingsLock();
+  renderChatInfo();
   // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
   if (chat.sid) {
     apiActivateSession(chat.sid).catch((err) => {
@@ -550,6 +679,42 @@ async function* parseSSE(response) {
 function setBubbleText(chat, el, text) {
   el.classList.remove('message--empty');
   el.querySelector('.message__content').textContent = text;
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+}
+
+function renderContextLimit(chat, el, text) {
+  // Спец-блок при достижении лимита контекста: сообщение + действия.
+  el.classList.remove('message--empty');
+  el.classList.add('message--context-limit');
+  const content = el.querySelector('.message__content');
+  content.textContent = '';
+
+  const icon = document.createElement('div');
+  icon.className = 'message__limit-icon';
+  icon.textContent = '⚠';
+  const msg = document.createElement('div');
+  msg.className = 'message__limit-text';
+  msg.textContent = text;
+  const actions = document.createElement('div');
+  actions.className = 'message__limit-actions';
+
+  const newBtn = document.createElement('button');
+  newBtn.type = 'button';
+  newBtn.className = 'message__limit-btn';
+  newBtn.textContent = 'Новый чат';
+  newBtn.addEventListener('click', async () => {
+    const fresh = await createChat();
+    activateChat(fresh);
+  });
+
+  const sumBtn = document.createElement('button');
+  sumBtn.type = 'button';
+  sumBtn.className = 'message__limit-btn';
+  sumBtn.textContent = 'Подвести итоги';
+  sumBtn.addEventListener('click', () => openSummaryChat());
+
+  actions.append(newBtn, sumBtn);
+  content.append(icon, msg, actions);
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
 }
 
@@ -645,8 +810,8 @@ function renderQaStats(qaEl, line) {
   const el = document.createElement('div');
   el.className = 'qa__stats';
   el.textContent =
-    `время: ${line.time}, вход: ${line.input}, выход: ${line.output}, ` +
-    `рассужд.: ${line.reasoning}, цена: ${line.cost}`;
+    `время: ${line.time}, вход (предыдуший + текущий): ${line.input}, выход: ${line.output}, ` +
+    `рассужд.: ${line.reasoning}, цена: $${line.cost}`;
   qaEl.appendChild(el);
   qaEl.parentElement.scrollTop = qaEl.parentElement.scrollHeight;
 }
@@ -708,7 +873,9 @@ async function streamAssistant(chat, qaEl) {
           finishReason = chunk.meta.finish_reason;
         }
       } else if (chunk.type === 'error') {
-        throw new Error(chunk.error || 'Неизвестная ошибка сервера');
+        const err = new Error(chunk.error || 'Неизвестная ошибка сервера');
+        err.code = chunk.code || null;
+        throw err;
       }
     }
 
@@ -739,13 +906,19 @@ async function streamAssistant(chat, qaEl) {
     renderQaStats(qaEl, formatMetaLine(finalMeta));
   } catch (err) {
     removeWaiter(assistantContent);
-    setBubbleText(chat, assistantEl, `Ошибка: ${err.message}`);
-    assistantEl.classList.add('message--error');
+    if (err.code === 'context_length_exceeded') {
+      renderContextLimit(chat, assistantEl, err.message);
+    } else {
+      setBubbleText(chat, assistantEl, `Ошибка: ${err.message}`);
+      assistantEl.classList.add('message--error');
+    }
     if (chat.history[chat.history.length - 1].role === 'user') chat.history.pop();
     renderQaStats(qaEl, formatMetaLine(null));
   } finally {
     chat.busy = false;
     updateSendButton();
+    updateSettingsLock();
+    renderChatInfo();
   }
 }
 
@@ -1081,6 +1254,7 @@ tabsListEl.addEventListener('click', (e) => {
 function syncActiveChatSettings() {
   const chat = getActiveChat();
   if (chat) chat.settings = collectSettings();
+  renderChatInfo();
 }
 
 if (tempRange) {
@@ -1095,6 +1269,10 @@ if (topPRange) {
     topPValue.textContent = topPRange.value;
     syncActiveChatSettings();
   });
+}
+
+if (topKInput) {
+  topKInput.addEventListener('input', syncActiveChatSettings);
 }
 
 if (maxTokensInput) {

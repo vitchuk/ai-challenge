@@ -11,6 +11,7 @@ from typing import Optional
 
 # Цены в долларах за 1M токенов: {"in": ..., "out": ...}
 MODEL_PRICES: dict[str, dict[str, float]] = {
+    "deepseek-flash": {"in": 0.22, "out": 0.66},
     "deepseek-v4-flash": {"in": 0.22, "out": 0.66},
     "deepseek-v4-flash-vision-exp": {"in": 0.22, "out": 0.66},
     "deepseek-v4-pro": {"in": 0.66, "out": 1.98},
@@ -69,3 +70,39 @@ def message_cost(model_id: str, prompt_tokens: int, completion_tokens: int) -> O
     if p is None:
         return None
     return (prompt_tokens * p["in"] + completion_tokens * p["out"]) / 1e6
+
+
+# Максимальный размер контекста моделей (в токенах). Значения получены
+# probe-запросами к апстримам (валидация prompt+max_tokens до генерации).
+# Для моделей, чей лимит апстрим не раскрывает, значение отсутствует —
+# в UI показывается «—».
+MODEL_CONTEXT: dict[str, int] = {
+    "deepseek-flash": 1048576,
+    "deepseek-v4-flash": 1048576,
+    "deepseek-v4-flash-vision-exp": 1048576,
+    "deepseek-v4-pro": 1048576,
+    "deepseek-chat": 1048576,
+    "deepseek-reasoner": 1048576,
+    "opencode/deepseek-v4-flash": 1048576,
+    "opencode/deepseek-v4-flash-vision-exp": 1048576,
+    "opencode/deepseek-v4-pro": 1048576,
+    "opencode/kimi-k2.6": 262144,
+    "opencode/longcat-2.0": 1048580,
+    "opencode/hy4-preview": 1048576,
+    "opencode/hy3": 262144,
+    "opencode/ling-3.0-flash-fin-free": 262144,
+    "opencode/nemotron-3-ultra-free": 1000000,
+    "opencode/nemotron-3.5-lightning-free": 1000000,
+}
+
+
+def model_context(model_id: str) -> Optional[int]:
+    """Максимальный размер контекста модели в токенах.
+
+    Args:
+        model_id: идентификатор модели.
+
+    Returns:
+        Размер контекста в токенах или ``None``, если модель неизвестна.
+    """
+    return MODEL_CONTEXT.get(model_id)

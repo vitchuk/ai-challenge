@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
-from ..pricing import model_price
+from ..pricing import model_context, model_price
 from ..providers.routing import (
     DEEPSEEK_MODELS_URL,
     GO_CHAT_MODELS,
@@ -41,7 +41,8 @@ async def list_models(request: Request) -> dict:
         request: HTTP-запрос.
 
     Returns:
-        ``{"object": "list", "data": [{"id", "owned_by", "price"}]}``.
+        ``{"object": "list", "data": [{"id", "owned_by", "price", "context"}]}``
+        (``context`` — максимальный размер контекста в токенах или ``None``).
 
     Raises:
         HTTPException: если не задан ни один ключ (500) или список пуст (502).
@@ -56,6 +57,14 @@ async def list_models(request: Request) -> dict:
     models: list[dict] = []
     errors: list[str] = []
 
+    def item(model_id: str, owned_by: str) -> dict:
+        return {
+            "id": model_id,
+            "owned_by": owned_by,
+            "price": model_price(model_id),
+            "context": model_context(model_id),
+        }
+
     if settings.deepseek_api_key:
         try:
             ids = await _fetch_ids(
@@ -64,7 +73,7 @@ async def list_models(request: Request) -> dict:
                 {"Authorization": f"Bearer {settings.deepseek_api_key}"},
             )
             for mid in ids:
-                models.append({"id": mid, "owned_by": "deepseek", "price": model_price(mid)})
+                models.append(item(mid, "deepseek"))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"DeepSeek: {exc}")
 
@@ -78,16 +87,14 @@ async def list_models(request: Request) -> dict:
             ids = await _fetch_ids(client, OPENCODE_MODELS_URL, base_headers)
             for mid in ids:
                 if mid in GO_CHAT_MODELS:
-                    full = f"{OPENCODE_PREFIX}{mid}"
-                    models.append({"id": full, "owned_by": "opencode", "price": model_price(full)})
+                    models.append(item(f"{OPENCODE_PREFIX}{mid}", "opencode"))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"OpenCode Go: {exc}")
         try:
             ids = await _fetch_ids(client, OPENCODE_ZEN_MODELS_URL, base_headers)
             for mid in ids:
                 if mid in ZEN_FREE_MODELS:
-                    full = f"{OPENCODE_PREFIX}{mid}"
-                    models.append({"id": full, "owned_by": "opencode", "price": model_price(full)})
+                    models.append(item(f"{OPENCODE_PREFIX}{mid}", "opencode"))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"OpenCode Zen (free): {exc}")
 
