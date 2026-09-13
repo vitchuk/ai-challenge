@@ -11,10 +11,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 
-from .chat_service import ChatService, MessageRecord, SessionKind
+from .chat_service import (
+    ChatService,
+    MessageRecord,
+    RequestRecord,
+    SessionKind,
+)
 from .generation import GenerationSettings
 
 SCHEMA = """
@@ -39,15 +45,48 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 
+CREATE TABLE IF NOT EXISTS llm_requests (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    idx               INTEGER NOT NULL,
+    kind              TEXT NOT NULL,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    reasoning_tokens  INTEGER,
+    created_at        REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_requests_session ON llm_requests(session_id, id);
+
+CREATE TABLE IF NOT EXISTS session_summary_state (
+    session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    chunks      INTEGER NOT NULL DEFAULT 0,
+    items       TEXT NOT NULL DEFAULT '[]',
+    updated_at  REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
 """
 
+# Дополнительные колонки, добавленные после первой версии схемы: для уже
+# созданных БД они досоздаются через ALTER TABLE (`CREATE TABLE IF NOT
+# EXISTS` существующую таблицу не изменяет). Формат: (таблица, колонка, тип).
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("llm_requests", "reasoning_tokens", "INTEGER"),
+]
+
+# Устаревшие таблицы, которые удаляются при открытии БД.
+DROPS: list[str] = ["session_summaries"]
+
 
 class SessionStore:
     """Прокси к SQLite-файлу: сохранение/загрузка сессий и сообщений.
+
+    При открытии существующей БД недостающие колонки (см. :data:`MIGRATIONS`)
+    добавляются автоматически, чтобы не терять историю при обновлении версии.
 
     Args:
         db_path: путь к файлу БД (``:memory:`` — временная БД для тестов).
@@ -62,7 +101,20 @@ class SessionStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Досоздаёт недостающие колонки и удаляет устаревшие таблицы."""
+        for table, column, decl in MIGRATIONS:
+            existing = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        for table in DROPS:
+            self._conn.execute(f"DROP TABLE IF EXISTS {table}")
 
     def close(self) -> None:
         """Закрывает соединение с БД."""
@@ -139,6 +191,56 @@ class SessionStore:
                 "UPDATE sessions SET last_active = ? WHERE id = ?",
                 (max(user_record.created_at, assistant_record.created_at), session_id),
             )
+
+    def append_request(self, session_id: str, record: RequestRecord) -> None:
+        """Дописывает запись о запросе к LLM (для графика/счётчика).
+
+        Для ``ephemeral``-сессий не вызывается (у них нет строки в ``sessions``,
+        и вставка нарушила бы FK) — фильтрация в ``SessionRegistry``.
+
+        Args:
+            session_id: идентификатор сессии.
+            record: запись о запросе.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO llm_requests
+                (session_id, idx, kind, prompt_tokens, completion_tokens,
+                 reasoning_tokens, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                record.index,
+                record.kind,
+                record.prompt_tokens,
+                record.completion_tokens,
+                record.reasoning_tokens,
+                record.created_at or time.time(),
+            ),
+        )
+        self._conn.commit()
+
+    def save_summary_state(self, session_id: str, chunks: int, items: list[str]) -> None:
+        """Сохраняет (upsert) состояние чанковой саммаризации сессии.
+
+        Args:
+            session_id: идентификатор сессии.
+            chunks: сколько чанков уже сжато.
+            items: накопленные саммари.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO session_summary_state (session_id, chunks, items, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                chunks = excluded.chunks,
+                items = excluded.items,
+                updated_at = excluded.updated_at
+            """,
+            (session_id, chunks, json.dumps(items, ensure_ascii=False), time.time()),
+        )
+        self._conn.commit()
 
     def delete_session(self, session_id: str) -> bool:
         """Удаляет сессию вместе с сообщениями.
@@ -224,5 +326,32 @@ class SessionStore:
                 )
                 record.created_at = msg["created_at"]
                 chat.history.append(record)
+            requests = self._conn.execute(
+                "SELECT idx, kind, prompt_tokens, completion_tokens, "
+                "reasoning_tokens, created_at "
+                "FROM llm_requests WHERE session_id = ? ORDER BY id",
+                (row["id"],),
+            ).fetchall()
+            for req in requests:
+                chat.requests.append(
+                    RequestRecord(
+                        index=req["idx"],
+                        kind=req["kind"],
+                        prompt_tokens=req["prompt_tokens"],
+                        completion_tokens=req["completion_tokens"],
+                        reasoning_tokens=req["reasoning_tokens"],
+                        created_at=req["created_at"],
+                        persisted=True,
+                    )
+                )
+            summary = self._conn.execute(
+                "SELECT chunks, items FROM session_summary_state WHERE session_id = ?",
+                (row["id"],),
+            ).fetchone()
+            if summary is not None:
+                chat.summarized_chunks = summary["chunks"]
+                loaded_items = json.loads(summary["items"] or "[]")
+                if isinstance(loaded_items, list):
+                    chat.summary_items = [str(item) for item in loaded_items]
             result.append(chat)
         return result

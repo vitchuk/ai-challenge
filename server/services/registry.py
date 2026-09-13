@@ -168,6 +168,35 @@ class SessionRegistry:
         self._store.save_session(chat)
         self._store.append_pair(chat.id, first_record, assistant_record)
 
+    def persist_new_requests(self, chat: ChatService) -> None:
+        """Персистит ещё не сохранённые записи о запросах к LLM.
+
+        Вызывается после саммаризации (токены уже сожжены) и после
+        завершения основного стрима. Для ``ephemeral``-сессий — no-op.
+
+        Args:
+            chat: сессия, чьи записи о запросах нужно сохранить.
+        """
+        if self._store is None or chat.kind == SessionKind.EPHEMERAL:
+            return
+        for record in chat.requests:
+            if not record.persisted:
+                self._store.append_request(chat.id, record)
+                record.persisted = True
+
+    def persist_summary_state(self, chat: ChatService) -> None:
+        """Персистит состояние чанковой саммаризации (курсор + саммари).
+
+        Args:
+            chat: сессия с заполненными ``summarized_chunks``/``summary_items``.
+        """
+        if self._store is None or chat.kind == SessionKind.EPHEMERAL:
+            return
+        if chat.summarized_chunks > 0 or chat.summary_items:
+            self._store.save_summary_state(
+                chat.id, chat.summarized_chunks, chat.summary_items
+            )
+
     def build_summary_context(self, exclude_id: str) -> str:
         """Собирает TOON-контекст из всех сессий, кроме ``exclude_id``.
 

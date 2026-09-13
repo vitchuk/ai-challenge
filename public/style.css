@@ -457,7 +457,8 @@ body {
    после первого сообщения чата — значения остаются видимыми, но неактивны. */
 .dropdown__button:disabled,
 .settings__range:disabled,
-.settings__input:disabled {
+.settings__input:disabled,
+.settings__switch input:disabled + .settings__switch-slider {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -1057,6 +1058,32 @@ body {
   color: var(--muted);
 }
 
+.settings__input--compact {
+  width: 68px;
+  flex: none;
+  padding: 7px 10px;
+  text-align: center;
+}
+
+.settings__inline-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings__tokens {
+  margin-top: auto;
+  padding-top: 16px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.settings__tokens-value {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .settings__switch-row {
   display: flex;
   align-items: center;
@@ -1115,25 +1142,123 @@ body {
   color: var(--muted);
 }
 
-.statusbar {
+.chartbar {
   flex: none;
   margin: 0 14px 14px;
-  height: 34px;
+  height: 168px;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  flex-direction: column;
+  padding: 8px 12px 10px;
   border-radius: 10px;
   border: 1px solid rgba(79, 140, 255, 0.2);
   background: rgba(15, 17, 21, 0.7);
-  color: var(--muted);
-  font-size: 13px;
 }
 
-.statusbar__value {
-  color: var(--text);
+.chartbar__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chartbar__title {
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+}
+
+.chartbar__head-side {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.chartbar__mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chartbar__mode-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.chartbar__mode .settings__switch {
+  width: 34px;
+  height: 18px;
+}
+
+.chartbar__mode .settings__switch-slider {
+  border-radius: 9px;
+}
+
+.chartbar__mode .settings__switch-slider::before {
+  width: 13px;
+  height: 13px;
+}
+
+.chartbar__mode .settings__switch input:checked + .settings__switch-slider::before {
+  transform: translateX(17px);
+}
+
+.chartbar__legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chartbar__legend[hidden] {
+  display: none;
+}
+
+.chartbar__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chartbar__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.chartbar__dot--input {
+  background: var(--accent);
+}
+
+.chartbar__dot--output {
+  background: #4caf7d;
+}
+
+.chartbar__dot--summary {
+  background: #e8a33d;
+}
+
+.chartbar__body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.chartbar__body canvas {
+  display: block;
+}
+
+.chartbar__empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--muted);
+  pointer-events: none;
 }
 
 @media (max-width: 700px) {

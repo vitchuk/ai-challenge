@@ -5,7 +5,7 @@
 
 Параметры делятся на две группы:
 - **привязываемые** к чату первым сообщением (`temperature`, `top_p`,
-  `top_k`) — далее не меняются;
+  `top_k`, `context_summary`) — далее не меняются;
 - **гибкие** (`max_tokens`, `stop`, `response_format`) — можно менять на лету.
 
 Поле ``top_k`` хранится для будущих провайдеров, но в текущие апстримы
@@ -22,6 +22,32 @@ MIN_TOP_P = 0.01
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
 MAX_STOP_WORDS = 16
+MIN_REQUESTS_PER_SUMMARY = 1
+MAX_REQUESTS_PER_SUMMARY = 20
+DEFAULT_REQUESTS_PER_SUMMARY = 5
+
+
+@dataclass
+class ContextSummarySettings:
+    """Настройки чанковой саммаризации истории чата.
+
+    При включении история делится на чанки по ``requests_per_summary``
+    завершённых обменов «вопрос+ответ»; каждый чанк сжимается в саммари
+    отдельным скрытым запросом к той же модели. Накопленные саммари
+    вкладываются в основной запрос.
+
+    Attributes:
+        enabled: включена ли саммаризация.
+        requests_per_summary: сколько запросов (обменов) покрывает одно
+            саммари (1–20).
+    """
+
+    enabled: bool = False
+    requests_per_summary: int = DEFAULT_REQUESTS_PER_SUMMARY
+
+    def to_dict(self) -> dict[str, Any]:
+        """Представляет настройки как словарь (для персистентности/API)."""
+        return {"enabled": self.enabled, "requests_per_summary": self.requests_per_summary}
 
 
 @dataclass
@@ -37,11 +63,14 @@ class GenerationSettings:
     max_tokens: Optional[int] = None
     stop: list[str] = field(default_factory=list)
     response_format: Optional[dict[str, Any]] = None
+    context_summary: Optional[ContextSummarySettings] = None
 
     def to_upstream(self) -> dict[str, Any]:
         """Возвращает словарь параметров, безопасный для передачи в апстрим.
 
-        Top_k намеренно не включается: DeepSeek/OpenCode его не принимают.
+        Top_k и context_summary намеренно не включаются: первый не
+        поддерживается DeepSeek/OpenCode, второй — серверная механика
+        саммаризации, а не параметр генерации.
         Пустые/незначимые поля опускаются.
         """
         out: dict[str, Any] = {}
@@ -70,6 +99,9 @@ class GenerationSettings:
             "max_tokens": self.max_tokens,
             "stop": list(self.stop),
             "response_format": self.response_format,
+            "context_summary": self.context_summary.to_dict()
+            if self.context_summary is not None
+            else None,
         }
 
     @classmethod
@@ -137,6 +169,25 @@ def _sanitize_response_format(value: Any) -> Optional[dict[str, Any]]:
     return {"type": rtype}
 
 
+def _sanitize_context_summary(value: Any) -> Optional[ContextSummarySettings]:
+    """Валидирует настройку чанковой саммаризации истории.
+
+    Невалидный ``enabled`` трактуется как выключенная саммаризация,
+    невалидный ``requests_per_summary`` заменяется дефолтом, выход за
+    диапазон — клэмпится. ``None``/не-словарь — настройка отсутствует.
+    """
+    if not isinstance(value, dict):
+        return None
+    enabled = value.get("enabled")
+    if not isinstance(enabled, bool):
+        enabled = False
+    requests = value.get("requests_per_summary")
+    if not isinstance(requests, int) or isinstance(requests, bool):
+        requests = DEFAULT_REQUESTS_PER_SUMMARY
+    requests = max(MIN_REQUESTS_PER_SUMMARY, min(MAX_REQUESTS_PER_SUMMARY, requests))
+    return ContextSummarySettings(enabled=enabled, requests_per_summary=requests)
+
+
 def sanitize_settings(raw: Any) -> GenerationSettings:
     """Валидирует и нормализует «сырой» словарь настроек.
 
@@ -155,4 +206,5 @@ def sanitize_settings(raw: Any) -> GenerationSettings:
         max_tokens=_sanitize_max_tokens(raw.get("max_tokens")),
         stop=_sanitize_stop(raw.get("stop")),
         response_format=_sanitize_response_format(raw.get("response_format")),
+        context_summary=_sanitize_context_summary(raw.get("context_summary")),
     )

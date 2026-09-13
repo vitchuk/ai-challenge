@@ -40,3 +40,4 @@ class SessionMeta(BaseModel):
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     history: list[dict[str, Any]] = []
+    requests: list[dict[str, Any]] = []

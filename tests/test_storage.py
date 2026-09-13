@@ -99,3 +99,104 @@ def test_upsert_session_updates_model(tmp_path):
     loaded = store.load_all()
     assert loaded[0].model == "opencode/glm-5.3"
     store.close()
+
+
+def test_requests_and_summary_roundtrip(tmp_path):
+    from server.services.chat_service import RequestRecord
+
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    chat = make_chat()
+    store.save_session(chat)
+    store.append_request(
+        chat.id,
+        RequestRecord(index=1, kind="summary", prompt_tokens=50, completion_tokens=7, created_at=1.0),
+    )
+    store.append_request(
+        chat.id,
+        RequestRecord(index=2, kind="main", prompt_tokens=100, completion_tokens=10, reasoning_tokens=4, created_at=2.0),
+    )
+    store.save_summary_state(chat.id, chunks=2, items=["S1", "S2"])
+
+    loaded = store.load_all()[0]
+    assert [r.kind for r in loaded.requests] == ["summary", "main"]
+    assert loaded.requests[1].prompt_tokens == 100
+    assert loaded.requests[1].reasoning_tokens == 4
+    assert loaded.requests[0].persisted is True
+    assert loaded.summarized_chunks == 2
+    assert loaded.summary_items == ["S1", "S2"]
+
+    # upsert состояния перезаписывает
+    store.save_summary_state(chat.id, chunks=3, items=["META"])
+    reloaded = store.load_all()[0]
+    assert reloaded.summarized_chunks == 3
+    assert reloaded.summary_items == ["META"]
+    store.close()
+
+
+def test_delete_cascades_requests_and_summary(tmp_path):
+    from server.services.chat_service import RequestRecord
+
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    chat = make_chat()
+    store.save_session(chat)
+    store.append_request(chat.id, RequestRecord(index=1, kind="main"))
+    store.save_summary_state(chat.id, chunks=1, items=["S"])
+    store.delete_session(chat.id)
+    assert store.load_all() == []
+    store.close()
+
+
+def test_migrates_missing_reasoning_column(tmp_path):
+    """Ранее созданная БД без llm_requests.reasoning_tokens досоздаётся."""
+    import sqlite3
+
+    from server.services.chat_service import RequestRecord
+
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            model TEXT,
+            system_prompt TEXT,
+            settings TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            last_active REAL NOT NULL
+        );
+        CREATE TABLE llm_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            idx INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            created_at REAL NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, kind, model, settings, created_at, last_active) "
+        "VALUES ('old1', 'chat', 'm', '{}', 1.0, 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SessionStore(db)
+    verify = sqlite3.connect(db)
+    columns = {row[1] for row in verify.execute("PRAGMA table_info(llm_requests)")}
+    verify.close()
+    assert "reasoning_tokens" in columns
+
+    store.append_request(
+        "old1",
+        RequestRecord(
+            index=1, kind="main", prompt_tokens=10, completion_tokens=5,
+            reasoning_tokens=3, created_at=1.0,
+        ),
+    )
+    assert store.load_all()[0].requests[0].reasoning_tokens == 3
+    store.close()

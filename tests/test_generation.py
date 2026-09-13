@@ -49,3 +49,30 @@ def test_non_dict_returns_defaults():
     s = sanitize_settings(None)
     assert isinstance(s, GenerationSettings)
     assert s.to_upstream() == {}
+
+
+def test_context_summary_valid():
+    s = sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 7}})
+    assert s.context_summary is not None
+    assert s.context_summary.enabled is True
+    assert s.context_summary.requests_per_summary == 7
+    assert s.to_dict()["context_summary"] == {"enabled": True, "requests_per_summary": 7}
+
+
+def test_context_summary_clamped_and_defaulted():
+    assert sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 0}}).context_summary.requests_per_summary == 1
+    assert sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 99}}).context_summary.requests_per_summary == 20
+    # невалидный requests_per_summary -> дефолт 5
+    assert sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": "x"}}).context_summary.requests_per_summary == 5
+
+
+def test_context_summary_enabled_must_be_bool():
+    s = sanitize_settings({"context_summary": {"enabled": "yes", "requests_per_summary": 3}})
+    assert s.context_summary.enabled is False
+    assert sanitize_settings({"context_summary": None}).context_summary is None
+    assert sanitize_settings({"context_summary": {}}).context_summary.enabled is False
+
+
+def test_context_summary_not_upstream():
+    s = sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 3}})
+    assert "context_summary" not in s.to_upstream()

@@ -117,7 +117,8 @@ async def list_sessions(request: Request) -> dict:
 
     Returns:
         ``{"data": [{id, kind, model, system_prompt, settings, last_active,
-        history}], "active_id": "…"|null}`` — активная сессия (открытая вкладка).
+        history, requests}], "active_id": "…"|null}`` — активная сессия
+        (открытая вкладка).
     """
     registry: SessionRegistry = request.app.state.registry
     data = []
@@ -133,6 +134,7 @@ async def list_sessions(request: Request) -> dict:
                 "settings": session.settings.to_dict(),
                 "last_active": session.last_active,
                 "history": [m.to_dict() for m in session.history],
+                "requests": [r.to_dict() for r in session.requests],
             }
         )
     return {"data": data, "active_id": registry.get_active()}
@@ -177,6 +179,7 @@ async def get_session(session_id: str, request: Request) -> dict:
         "settings": session.settings.to_dict(),
         "last_active": session.last_active,
         "history": [m.to_dict() for m in session.history],
+        "requests": [r.to_dict() for r in session.requests],
     }
 
 
@@ -204,7 +207,7 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
 
     Returns:
         Поток Server-Sent Events с событиями ``session/reasoning_start/
-        reasoning_end/done/error``.
+        reasoning_end/request_log/done/error``.
     """
     registry: SessionRegistry = request.app.state.registry
     session = registry.get(session_id)
@@ -248,20 +251,55 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
     runner = StreamedCompletion(client=request.app.state.http_client)
 
     async def event_stream():
+        # Помечаем чат занятым до первого await: саммаризация (если включена)
+        # идёт до основного стрима, и параллельный запрос должен получить 409.
+        session.busy = True
+        # Записи, уже отданные клиенту в прошлых ответах, повторно не шлём.
+        emitted = len(session.requests)
+
+        def drain_request_logs() -> list[str]:
+            nonlocal emitted
+            frames = []
+            while emitted < len(session.requests):
+                record = session.requests[emitted]
+                frames.append(_sse({"type": "request_log", "record": record.to_dict()}))
+                emitted += 1
+            return frames
+
         yield _sse({"type": "session", "id": session_id})
         try:
+            # Скрытая чанковая саммаризация истории (если включена).
+            summary_items = await session.ensure_summaries(runner, spec, gen_settings)
+            # Токены саммаризации уже сожжены — сохраняем состояние и отдаём их сразу.
+            registry.persist_summary_state(session)
+            registry.persist_new_requests(session)
+            for frame in drain_request_logs():
+                yield frame
+
             async for event in session.stream_completion(
-                runner, spec, gen_settings, extra_system=body.system_prompt
+                runner,
+                spec,
+                gen_settings,
+                extra_system=body.system_prompt,
+                summary_items=summary_items,
             ):
+                if event.get("type") == "done":
+                    for frame in drain_request_logs():
+                        yield frame
                 yield _sse(event)
-            # Успешное завершение: сохраняем пару user+assistant в БД.
+            # Успешное завершение: сохраняем пару user+assistant и записи.
             registry.remember_pair(session)
+            registry.persist_new_requests(session)
         except ProviderError as exc:
             session.rollback_user_message()
+            registry.persist_new_requests(session)
             yield _sse(_provider_error_event(exc, session))
         except Exception as exc:  # noqa: BLE001 - отдаём ошибку клиенту как событие
             session.rollback_user_message()
+            registry.persist_new_requests(session)
             yield _sse({"type": "error", "error": str(exc)})
+        finally:
+            session.busy = False
 
     return StreamingResponse(
         event_stream(),
