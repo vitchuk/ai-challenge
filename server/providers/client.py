@@ -47,7 +47,7 @@ class StreamedCompletion:
             ProviderError: если апстрим вернул ошибку.
         """
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient()
+        client = self._client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0))
         try:
             async for event in stream_completion(client, spec, messages, settings):
                 yield event

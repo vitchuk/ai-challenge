@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import AsyncIterator, Optional
 
 import httpx
@@ -39,6 +40,41 @@ def _upstream_error_message(raw_text: str) -> str:
         pass
     trimmed = raw_text.strip()
     return trimmed[:200] + "…" if len(trimmed) > 200 else trimmed
+
+
+_CONTEXT_ERROR_RE = re.compile(
+    r"(maximum context length|context length|context window|reduce the length|"
+    r"longer than the model's context)",
+    re.IGNORECASE,
+)
+_MAX_RE = re.compile(
+    r"(?:maximum context length is|context length \()\s*(\d+)", re.IGNORECASE
+)
+_REQUESTED_RE = re.compile(r"(?:requested|input)\s*\(?\s*(?:about\s*)?(\d+)", re.IGNORECASE)
+
+
+def _classify_upstream_error(status: int, message: str) -> tuple[Optional[str], dict]:
+    """Классифицирует ошибку апстрима.
+
+    Args:
+        status: HTTP-статус.
+        message: извлечённое сообщение ошибки.
+
+    Returns:
+        Кортеж ``(code, details)``: для ошибки лимита контекста —
+        ``("context_length_exceeded", {"max_context": int|None, "requested": int|None})``,
+        иначе ``(None, {})``.
+    """
+    if status != 400 or not _CONTEXT_ERROR_RE.search(message):
+        return None, {}
+    details: dict = {}
+    m = _MAX_RE.search(message)
+    if m:
+        details["max_context"] = int(m.group(1))
+    r = _REQUESTED_RE.search(message)
+    if r:
+        details["requested"] = int(r.group(1))
+    return "context_length_exceeded", details
 
 
 def _parse_event_data(data_str: str) -> Optional[ChatEvent]:
@@ -153,10 +189,13 @@ async def stream_completion(
             if response.status_code != 200:
                 body = await response.aread()
                 text = body.decode("utf-8", errors="replace")
+                upstream_msg = _upstream_error_message(text)
+                code, details = _classify_upstream_error(response.status_code, upstream_msg)
                 raise ProviderError(
                     response.status_code,
-                    f"{spec.provider_name} API error: {response.status_code} — "
-                    f"{_upstream_error_message(text)}",
+                    f"{spec.provider_name} API error: {response.status_code} — {upstream_msg}",
+                    code=code,
+                    details=details,
                 )
             buffer = ""
             reasoning_buf: list[str] = []
@@ -208,4 +247,5 @@ async def stream_completion(
             if text:
                 yield ChatEvent(kind="reasoning_end", content=text)
     except httpx.HTTPError as exc:
-        raise ProviderError(502, f"{spec.provider_name} connection error: {exc}") from exc
+        detail = f"{type(exc).__name__}: {exc}".strip()
+        raise ProviderError(502, f"{spec.provider_name} connection error: {detail}") from exc

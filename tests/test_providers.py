@@ -3,7 +3,7 @@
 import pytest
 
 from server.providers import UnsupportedModelError, resolve_provider
-from server.providers.engine import _parse_event_data
+from server.providers.engine import _classify_upstream_error, _parse_event_data
 from server.providers.base import ChatEvent
 
 
@@ -173,3 +173,43 @@ def test_opencode_identity_prompt_not_prepended():
     body = json.loads(transport.requests[0].content)
     messages = body["messages"]
     assert messages[0] == {"role": "user", "content": "hi"}
+
+
+def test_classify_context_error_deepseek():
+    # дословно снято с api.deepseek.com
+    msg = (
+        "This model's maximum context length is 1048576 tokens. However, you "
+        "requested 1293247 tokens (900031 in the messages, 393216 in the completion). "
+        "Please reduce the length of the messages or completion."
+    )
+    code, details = _classify_upstream_error(400, msg)
+    assert code == "context_length_exceeded"
+    assert details["max_context"] == 1048576
+    assert details["requested"] == 1293247
+
+
+def test_classify_context_error_longcat():
+    # иной формат: context length (N) / The input (M tokens)
+    msg = ("The input (1800007 tokens) is longer than the model's context "
+           "length (1048580 tokens)")
+    code, details = _classify_upstream_error(400, msg)
+    assert code == "context_length_exceeded"
+    assert details["max_context"] == 1048580
+    assert details["requested"] == 1800007
+
+
+def test_classify_context_error_kimi_endpoint():
+    msg = ("This endpoint's maximum context length is 262144 tokens. However, "
+           "you requested about 100000000 tokens (1 of text)")
+    code, details = _classify_upstream_error(400, msg)
+    assert code == "context_length_exceeded"
+    assert details["max_context"] == 262144
+
+
+def test_classify_generic_error_has_no_code():
+    code, details = _classify_upstream_error(402, "Insufficient balance")
+    assert code is None
+    assert details == {}
+    # код возвращается только для 400 с признаком контекста
+    code, _ = _classify_upstream_error(500, "maximum context length is 1 tokens")
+    assert code is None
