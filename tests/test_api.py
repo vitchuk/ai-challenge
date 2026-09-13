@@ -26,7 +26,8 @@ async def test_full_session_lifecycle(client):
     assert r.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(r.text)
     types = [e["type"] for e in events]
-    assert types == ["session", "done"]
+    assert types == ["session", "request_log", "done"]
+    assert events[1]["record"]["kind"] == "main"
     assert events[-1]["content"] == "Ответ"
     assert events[-1]["meta"]["completion_tokens"] == 233
     assert events[-1]["meta"]["reasoning_tokens"] == 100
@@ -445,4 +446,140 @@ async def test_restart_restores_full_history(tmp_path, monkeypatch):
         sid2 = (await c2.post("/api/sessions", json={})).json()["id"]
         assert sid2 != sid
         assert not sid2.startswith("chat-")
+    await app2.state.http_client.aclose()
+
+
+# ── Саммаризация контекста ──────────────────────────────────────────────────
+
+SUMMARY_SETTINGS = {"context_summary": {"enabled": True, "requests_per_summary": 3}}
+
+
+async def test_context_summarization_flow(app, client):
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    # 3 запроса (сид + 2 обмена) накапливаются без саммари: чанк не полон
+    for i in range(3):
+        r = await client.post(
+            f"/api/sessions/{sid}/messages",
+            json={"content": f"вопрос {i}", "settings": SUMMARY_SETTINGS},
+        )
+        assert [e["type"] for e in parse_sse(r.text)] == [
+            "session", "request_log", "done",
+        ]
+
+    # 4-й запрос: первый чанк завершён -> скрытая саммаризация + основной запрос
+    transport = app.state.mock_transport
+    r = await client.post(
+        f"/api/sessions/{sid}/messages",
+        json={"content": "вопрос 3", "settings": SUMMARY_SETTINGS},
+    )
+    events = parse_sse(r.text)
+    assert [e["type"] for e in events] == [
+        "session", "request_log", "request_log", "done",
+    ]
+    assert events[1]["record"]["kind"] == "summary"
+    assert events[2]["record"]["kind"] == "main"
+    assert events[2]["record"]["reasoning_tokens"] == 100
+    assert events[-1]["meta"]["summarized"] is True
+
+    summary_body = json.loads(transport.requests[-2].content)
+    main_body = json.loads(transport.requests[-1].content)
+    # саммаризационный запрос: суммаризатор + первый чанк (ответ на сид + 2 обмена)
+    assert summary_body["messages"][0]["role"] == "system"
+    assert "суммаризатор" in summary_body["messages"][0]["content"].lower()
+    assert [m["content"] for m in summary_body["messages"][1:]] == [
+        "Ответ", "вопрос 1", "Ответ", "вопрос 2", "Ответ",
+    ]
+    # основной запрос: [системный сид] + [саммари-рамка] + вербатим-хвост
+    main_msgs = main_body["messages"]
+    assert main_msgs[0] == {"role": "system", "content": "вопрос 0"}
+    assert "Саммари начала диалога" in main_msgs[1]["content"]
+    assert "Саммари 1:" in main_msgs[1]["content"]
+    assert [m["content"] for m in main_msgs[2:]] == ["вопрос 3"]
+
+    # записи о всех запросах отдаются в состоянии сессии
+    state = (await client.get(f"/api/sessions/{sid}")).json()
+    assert [r["kind"] for r in state["requests"]] == [
+        "main", "main", "main", "summary", "main",
+    ]
+
+
+async def test_context_summary_bound_by_first_message(app, client):
+    sid = (await client.post("/api/sessions", json={})).json()["id"]
+    await client.post(
+        f"/api/sessions/{sid}/messages",
+        json={"content": "инструкция", "settings": SUMMARY_SETTINGS},
+    )
+    r = await client.post(
+        f"/api/sessions/{sid}/messages",
+        json={
+            "content": "вопрос",
+            "settings": {
+                "context_summary": {"enabled": False, "requests_per_summary": 10}
+            },
+        },
+    )
+    assert parse_sse(r.text)[-1]["type"] == "done"
+    svc = app.state.registry.get(sid)
+    assert svc.settings.context_summary.enabled is True
+    assert svc.settings.context_summary.requests_per_summary == 3
+
+
+async def test_restart_restores_summary_state(tmp_path, monkeypatch):
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import MockTransport, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+    db = str(tmp_path / "chats.db")
+
+    def build():
+        application = create_app()
+        transport = MockTransport(make_chat_chunks(content="Ответ", usage=USAGE))
+        application.state.http_client = httpx.AsyncClient(transport=transport)
+        application.state.opencode_session_id = "sess"
+        application.state.registry = SessionRegistry(
+            config.get_settings(), store=SessionStore(db)
+        )
+        application.state.registry.restore()
+        return application, transport
+
+    app1, _ = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://t") as c1:
+        sid = (await c1.post("/api/sessions", json={})).json()["id"]
+        # 4 запроса -> первый чанк сжат (курсор = 1)
+        for i in range(4):
+            r = await c1.post(
+                f"/api/sessions/{sid}/messages",
+                json={"content": f"вопрос {i}", "settings": SUMMARY_SETTINGS},
+            )
+            assert parse_sse(r.text)[-1]["type"] == "done"
+    await app1.state.http_client.aclose()
+
+    app2, transport2 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://t") as c2:
+        state = (await c2.get(f"/api/sessions/{sid}")).json()
+        assert [r["kind"] for r in state["requests"]] == [
+            "main", "main", "main", "summary", "main",
+        ]
+        assert state["requests"][3]["reasoning_tokens"] == 100
+        assert state["settings"]["context_summary"] == {
+            "enabled": True, "requests_per_summary": 3,
+        }
+
+        # после рестарта готовый чанк не пересчитывается: курсор восстановлен
+        r = await c2.post(
+            f"/api/sessions/{sid}/messages",
+            json={"content": "вопрос 4", "settings": SUMMARY_SETTINGS},
+        )
+        assert [e["type"] for e in parse_sse(r.text)] == [
+            "session", "request_log", "done",
+        ]
+        assert len(transport2.requests) == 1  # только основной запрос, без саммари
     await app2.state.http_client.aclose()

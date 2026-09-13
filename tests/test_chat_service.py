@@ -3,8 +3,14 @@
 import pytest
 
 from server.pricing import message_cost
-from server.services.chat_service import ChatService, MessageMeta, SessionKind
-from server.services.generation import GenerationSettings
+from server.services.chat_service import (
+    SUMMARY_MESSAGE_PREFIX,
+    SUMMARIZER_SYSTEM_PROMPT,
+    ChatService,
+    MessageMeta,
+    SessionKind,
+)
+from server.services.generation import ContextSummarySettings, GenerationSettings
 
 
 class FakeRunner:
@@ -77,6 +83,9 @@ def test_stream_completion_records_meta_and_events():
     assert assistant.meta.cost_usd == message_cost("deepseek-chat", 10, 5)
     assert assistant.meta.finish_reason == "stop"
     assert assistant.meta.elapsed_s >= 0
+    # запись о запросе несёт рассуждения (часть выхода)
+    assert svc.requests[-1].kind == "main"
+    assert svc.requests[-1].reasoning_tokens == 2
 
 
 def test_stream_completion_sends_system_prompt_and_history():
@@ -180,3 +189,246 @@ def asyncio_run(coro):
 async def consume_stream(svc, runner, spec, extra_system=None):
     async for _ in svc.stream_completion(runner, spec, extra_system=extra_system):
         pass
+
+
+# ── Саммаризация контекста ──────────────────────────────────────────────────
+
+
+class ScriptedRunner:
+    """Раннер, отдающий разные ответы на последовательные вызовы."""
+
+    def __init__(self, scripts):
+        self.scripts = list(scripts)
+        self.calls = []
+
+    async def run(self, spec, messages, settings):
+        self.calls.append({"messages": messages, "settings": settings})
+        script = self.scripts.pop(0) if self.scripts else []
+        if isinstance(script, Exception):
+            raise script
+        for event in script:
+            yield event
+
+
+def summary_events(text="САММАРИ"):
+    from server.providers.base import ChatEvent, Usage, UsageDetails
+
+    return [
+        ChatEvent(kind="delta", content=text),
+        ChatEvent(kind="done", finish_reason="stop",
+                  usage=Usage(prompt_tokens=50, completion_tokens=7,
+                              details=UsageDetails(reasoning_tokens=3))),
+    ]
+
+
+def text_events(text="Ответ", prompt=100, completion=10):
+    from server.providers.base import ChatEvent, Usage
+
+    return [
+        ChatEvent(kind="delta", content=text),
+        ChatEvent(kind="done", finish_reason="stop",
+                  usage=Usage(prompt_tokens=prompt, completion_tokens=completion)),
+    ]
+
+
+def run_coro(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def spec_obj(model="m"):
+    return type("Spec", (), {"model": model, "model_label": model})()
+
+
+def fill_chat(svc, exchanges, pending_user=None):
+    """Реалистичная история чата с сидом.
+
+    Сид (первое сообщение) + ответ на него + ``exchanges`` обменов
+    «вопрос+ответ» (+ висящий вопрос ``pending_user``). Ответ на сид — это
+    вводное сообщение, примыкающее к первому чанку.
+    """
+    svc.seed_system_message("инструкция")
+    svc.append_assistant_message("a0", MessageMeta(model="m", elapsed_s=0.1))
+    for i in range(1, exchanges + 1):
+        svc.add_user_message(f"u{i}")
+        svc.append_assistant_message(f"a{i}", MessageMeta(model="m", elapsed_s=0.1))
+    if pending_user is not None:
+        svc.add_user_message(pending_user)
+
+
+def cs_settings(requests_per_summary):
+    return GenerationSettings(
+        context_summary=ContextSummarySettings(
+            enabled=True, requests_per_summary=requests_per_summary
+        )
+    )
+
+
+def test_ensure_summaries_below_threshold():
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 1, pending_user="u2")  # сид-ответ + 1 обмен = 2 запроса
+    runner = ScriptedRunner([])
+    assert run_coro(svc.ensure_summaries(runner, spec_obj(), settings)) == []
+    assert runner.calls == []
+    assert svc.summarized_chunks == 0
+
+
+def test_ensure_summaries_first_chunk_includes_seed_reply():
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    # 3 запроса: ответ на сид + 2 обмена; ждём саммари на 4-й отправке
+    fill_chat(svc, 2, pending_user="u3")
+    runner = ScriptedRunner([summary_events("S1")])
+    items = run_coro(svc.ensure_summaries(runner, spec_obj(), settings))
+    assert items == ["S1"]
+    assert svc.summarized_chunks == 1
+    # в скрытый запрос ушёл первый чанк: ответ на сид + 2 обмена
+    sent = runner.calls[0]["messages"]
+    assert sent[0] == {"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT}
+    assert [m["content"] for m in sent[1:]] == ["a0", "u1", "a1", "u2", "a2"]
+    assert svc.requests[0].kind == "summary"
+
+
+def test_ensure_summaries_does_not_recount_ready_chunks():
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 2, pending_user="u3")
+    runner = ScriptedRunner([summary_events("S1")])
+    run_coro(svc.ensure_summaries(runner, spec_obj(), settings))
+    # ответили на u3 (запросов стало 4) и задали u4 — второй чанк ещё не полон
+    svc.append_assistant_message("a3", MessageMeta(model="m", elapsed_s=0.1))
+    svc.add_user_message("u4")
+    assert run_coro(svc.ensure_summaries(runner, spec_obj(), settings)) == ["S1"]
+    assert len(runner.calls) == 1  # готовый чанк не пересчитывается
+
+
+def test_ensure_summaries_two_chunks_and_verbatim_tail():
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 5, pending_user="u6")  # 6 запросов -> 2 чанка
+    runner = ScriptedRunner([summary_events("S1"), summary_events("S2")])
+    items = run_coro(svc.ensure_summaries(runner, spec_obj(), settings))
+    assert items == ["S1", "S2"]
+    assert svc.summarized_chunks == 2
+
+    msgs = svc.build_request_messages(items)
+    assert msgs[0] == {"role": "system", "content": "инструкция"}
+    assert msgs[1]["content"] == (
+        f"{SUMMARY_MESSAGE_PREFIX}\nСаммари 1:\nS1\n\nСаммари 2:\nS2"
+    )
+    # хвост — только висящее сообщение
+    assert [m["content"] for m in msgs[2:]] == ["u6"]
+
+
+def test_ensure_summaries_tail_verbatim_inside_chunk():
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 3, pending_user="u4")  # 4 запроса: 1 чанк + незавершённый обмен
+    runner = ScriptedRunner([summary_events("S1")])
+    items = run_coro(svc.ensure_summaries(runner, spec_obj(), settings))
+    msgs = svc.build_request_messages(items)
+    assert msgs[1]["content"].startswith(SUMMARY_MESSAGE_PREFIX)
+    # после первого чанка (сид-ответ + обмены 1-2) вербатим: обмен 3 + u4
+    assert [m["content"] for m in msgs[2:]] == ["u3", "a3", "u4"]
+
+
+def test_ensure_summaries_collapses_at_three():
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 8, pending_user="u9")  # 9 запросов -> 3 чанка -> свёртка
+    runner = ScriptedRunner([
+        summary_events("S1"),
+        summary_events("S2"),
+        summary_events("S3"),
+        summary_events("META"),
+    ])
+    items = run_coro(svc.ensure_summaries(runner, spec_obj(), settings))
+    assert items == ["META"]
+    assert svc.summarized_chunks == 3
+    assert len(runner.calls) == 4  # 3 чанка + метасаммари
+    # метасаммари получило тексты всех саммари
+    meta_input = runner.calls[3]["messages"][1]["content"]
+    assert "Саммари 1:\nS1" in meta_input
+    assert "Саммари 3:\nS3" in meta_input
+
+    msgs = svc.build_request_messages(items)
+    assert msgs[1]["content"] == f"{SUMMARY_MESSAGE_PREFIX}\nСаммари 1:\nMETA"
+    assert [m["content"] for m in msgs[2:]] == ["u9"]
+
+
+def test_ensure_summaries_degrades_on_chunk_error():
+    from server.providers.base import ProviderError
+
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 2, pending_user="u3")
+    runner = ScriptedRunner([ProviderError(500, "boom")])
+    items = run_coro(svc.ensure_summaries(runner, spec_obj(), settings))
+    assert items == []
+    assert svc.summarized_chunks == 0
+    assert svc.requests == []
+    # основной запрос уходит с полной историей
+    msgs = svc.build_request_messages(items)
+    assert [m["content"] for m in msgs] == [
+        "инструкция", "a0", "u1", "a1", "u2", "a2", "u3",
+    ]
+
+
+def test_ensure_summaries_collapse_failure_keeps_items():
+    from server.providers.base import ProviderError
+
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 8, pending_user="u9")
+    runner = ScriptedRunner([
+        summary_events("S1"),
+        summary_events("S2"),
+        summary_events("S3"),
+        ProviderError(500, "boom"),
+    ])
+    items = run_coro(svc.ensure_summaries(runner, spec_obj(), settings))
+    assert items == ["S1", "S2", "S3"]
+    assert svc.summarized_chunks == 3
+
+
+def test_ensure_summaries_disabled_returns_empty():
+    svc = ChatService("c1", model="m")
+    runner = ScriptedRunner([])
+    assert run_coro(svc.ensure_summaries(runner, spec_obj(), GenerationSettings())) == []
+
+
+def test_build_request_messages_without_summary_is_full_history():
+    settings = GenerationSettings()
+    svc = ChatService("c1", model="m", system_prompt="sys", settings=settings)
+    svc.add_user_message("q")
+    assert svc.build_request_messages() == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q"},
+    ]
+
+
+def test_stream_completion_with_summary_records_main_and_marks_meta():
+    settings = cs_settings(2)
+    svc = ChatService("c1", model="m", settings=settings)
+    svc.add_user_message("q")
+    runner = ScriptedRunner([text_events()])
+    events = []
+
+    async def consume():
+        async for e in svc.stream_completion(
+            runner, spec_obj(), settings, summary_items=["КРАТКО"]
+        ):
+            events.append(e)
+
+    run_coro(consume())
+    assert events[-1]["meta"]["summarized"] is True
+    assert svc.requests[-1].kind == "main"
+    # в апстрим ушли: наша история с саммари-рамкой
+    sent = runner.calls[0]["messages"]
+    assert sent[0] == {
+        "role": "user",
+        "content": f"{SUMMARY_MESSAGE_PREFIX}\nСаммари 1:\nКРАТКО",
+    }
+    assert sent[-1]["content"] == "q"

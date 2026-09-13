@@ -13,6 +13,8 @@ const tempValue = document.getElementById('temperature-value');
 const topPRange = document.getElementById('setting-top-p');
 const topPValue = document.getElementById('top-p-value');
 const topKInput = document.getElementById('setting-top-k');
+const summaryToggle = document.getElementById('setting-summary');
+const keepRecentInput = document.getElementById('setting-keep-recent');
 const maxTokensInput = document.getElementById('setting-max-tokens');
 const stopInput = document.getElementById('setting-stop');
 const modeToggle = document.getElementById('setting-mode');
@@ -21,6 +23,10 @@ const newChatBtn = document.getElementById('new-chat');
 const summarizeBtn = document.getElementById('summarize');
 const tabsListEl = document.getElementById('tabs-list');
 const chatInfoEl = document.getElementById('chat-info');
+const chartCanvas = document.getElementById('context-chart');
+const chartEmpty = document.getElementById('chart-empty');
+const chartColorToggle = document.getElementById('chart-color-mode');
+const chartLegend = document.querySelector('.chartbar__legend');
 const commandMenu = document.getElementById('command-menu');
 const commandModal = document.getElementById('command-modal');
 const modalBody = document.getElementById('modal-body');
@@ -90,6 +96,14 @@ const MODEL_CONTEXT = {
 const JSON_SYSTEM_PROMPT = 'Выдавай ответ строго в формате JSON.';
 const SUMMARY_CHAT_TITLE = 'Подвести итоги';
 
+const CHART_COLOR_MODE_KEY = 'pomogator2k:chart-color-mode';
+let chartColorMode = false;
+try {
+  chartColorMode = localStorage.getItem(CHART_COLOR_MODE_KEY) === '1';
+} catch {
+  chartColorMode = false;
+}
+
 const chats = [];
 let activeChatId = null;
 let chatCounter = 0;
@@ -99,6 +113,35 @@ let selectedModel = null;
 // ── Базовые UI-утилиты ─────────────────────────────────────────────────────
 function renderTotal() {
   tokensTotalEl.textContent = String(tokensBurned);
+}
+
+function computeTokensTotal() {
+  let sum = 0;
+  for (const chat of chats) {
+    for (const r of chat.requests || []) {
+      sum += (r.prompt_tokens || 0) + (r.completion_tokens || 0);
+    }
+  }
+  tokensBurned = sum;
+  renderTotal();
+}
+
+function handleRequestLog(chat, record) {
+  // Запись о запросе к LLM (основной ответ или скрытая саммаризация).
+  if (!chat || !record) return;
+  chat.requests = chat.requests || [];
+  chat.requests.push(record);
+  const total = (record.prompt_tokens || 0) + (record.completion_tokens || 0);
+  if (total > 0) {
+    tokensBurned += total;
+    renderTotal();
+  }
+  renderChart();
+}
+
+function formatTokens(n) {
+  if (typeof n !== 'number') return '—';
+  return n.toLocaleString('ru-RU');
 }
 
 function currentModel() {
@@ -121,6 +164,13 @@ function collectSettings() {
     .filter(Boolean);
   if (stop.length > 0) settings.stop = stop;
   if (!modeToggle.checked) settings.response_format = { type: 'json_object' };
+  if (summaryToggle) {
+    const requests = parseInt(keepRecentInput.value, 10);
+    settings.context_summary = {
+      enabled: summaryToggle.checked,
+      requests_per_summary: Number.isInteger(requests) ? requests : 5
+    };
+  }
   return settings;
 }
 
@@ -145,6 +195,8 @@ function resetChatPanel() {
   if (topKInput) topKInput.value = '';
   if (maxTokensInput) maxTokensInput.value = '';
   if (stopInput) stopInput.value = '';
+  if (summaryToggle) summaryToggle.checked = false;
+  if (keepRecentInput) keepRecentInput.value = '5';
 }
 
 function defaultChatSettings() {
@@ -154,20 +206,29 @@ function defaultChatSettings() {
     top_k: null,
     max_tokens: null,
     stop: [],
-    response_format: null
+    response_format: null,
+    context_summary: { enabled: false, requests_per_summary: 5 }
   };
 }
 
 function normalizeServerSettings(s) {
   const def = defaultChatSettings();
   if (!s || typeof s !== 'object') return def;
+  const cs = s.context_summary;
   return {
     temperature: typeof s.temperature === 'number' ? s.temperature : def.temperature,
     top_p: typeof s.top_p === 'number' ? s.top_p : def.top_p,
     top_k: s.top_k || null,
     max_tokens: s.max_tokens || null,
     stop: Array.isArray(s.stop) ? s.stop : [],
-    response_format: s.response_format || null
+    response_format: s.response_format || null,
+    context_summary: {
+      enabled: Boolean(cs && cs.enabled),
+      requests_per_summary:
+        cs && Number.isInteger(cs.requests_per_summary)
+          ? Math.min(20, Math.max(1, cs.requests_per_summary))
+          : 5
+    }
   };
 }
 
@@ -187,19 +248,29 @@ function applyChatSettings(chat) {
   if (topKInput) topKInput.value = s.top_k ? String(s.top_k) : '';
   if (maxTokensInput) maxTokensInput.value = s.max_tokens ? String(s.max_tokens) : '';
   if (stopInput) stopInput.value = Array.isArray(s.stop) ? s.stop.join(', ') : '';
+  const cs = s.context_summary || defaultChatSettings().context_summary;
+  if (summaryToggle) summaryToggle.checked = Boolean(cs.enabled);
+  if (keepRecentInput) keepRecentInput.value = String(cs.requests_per_summary || 5);
 }
 
 function isEstablished(chat) {
   return Boolean(chat && chat.history && chat.history.length > 0);
 }
 
+function updateSummaryFieldState(locked) {
+  if (!keepRecentInput) return;
+  keepRecentInput.disabled = locked || !summaryToggle.checked;
+}
+
 function updateSettingsLock() {
   const chat = getActiveChat();
   const locked = isEstablished(chat);
-  // Привязываемые первым сообщением контролы: модель, temperature, top_p, top_k.
-  for (const el of [modelButton, tempRange, topPRange, topKInput]) {
+  // Привязываемые первым сообщением контролы: модель, temperature,
+  // top_p, top_k, саммаризация (тумблер + N).
+  for (const el of [modelButton, tempRange, topPRange, topKInput, summaryToggle]) {
     if (el) el.disabled = locked;
   }
+  updateSummaryFieldState(locked);
   if (modelDropdown) modelDropdown.dataset.locked = locked ? 'true' : 'false';
   if (locked) closeModelMenu();
 }
@@ -393,6 +464,7 @@ function renderModelMenu(models) {
         const chat = getActiveChat();
         if (chat) chat.model = m.id;
         renderChatInfo();
+        renderChart();
       });
       modelMenu.appendChild(item);
     }
@@ -514,6 +586,7 @@ async function createChat(kind = 'chat', title = 'Новый чат') {
     sid: null,
     title,
     history: [],
+    requests: [],
     renamed: false,
     kind,
     busy: false,
@@ -597,6 +670,7 @@ function activateChat(chat) {
   applyChatSettings(chat);
   updateSettingsLock();
   renderChatInfo();
+  renderChart();
   // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
   if (chat.sid) {
     apiActivateSession(chat.sid).catch((err) => {
@@ -872,6 +946,8 @@ async function streamAssistant(chat, qaEl) {
         if (chunk.meta && chunk.meta.finish_reason) {
           finishReason = chunk.meta.finish_reason;
         }
+      } else if (chunk.type === 'request_log') {
+        handleRequestLog(chat, chunk.record);
       } else if (chunk.type === 'error') {
         const err = new Error(chunk.error || 'Неизвестная ошибка сервера');
         err.code = chunk.code || null;
@@ -886,16 +962,6 @@ async function streamAssistant(chat, qaEl) {
       renderJsonEnvelope(chat, assistantEl, thinkingText, finalResponse, responseDate, usage);
     } else {
       setBubbleText(chat, assistantEl, finalResponse);
-    }
-
-    // Счётчик израсходованных токенов (футер).
-    if (finalMeta) {
-      const total =
-        (finalMeta.prompt_tokens || 0) + (finalMeta.completion_tokens || 0);
-      if (total > 0) {
-        tokensBurned += total;
-        renderTotal();
-      }
     }
 
     chat.history.push({
@@ -1038,6 +1104,13 @@ async function runOptimizePrompt(userText) {
         thinking = true;
       } else if (chunk.type === 'reasoning_end') {
         thinkingText = chunk.content || '';
+      } else if (chunk.type === 'request_log') {
+        const record = chunk.record || {};
+        const total = (record.prompt_tokens || 0) + (record.completion_tokens || 0);
+        if (total > 0) {
+          tokensBurned += total;
+          renderTotal();
+        }
       } else if (chunk.type === 'done') {
         finalMeta = chunk.meta || null;
         full = chunk.content || '';
@@ -1055,12 +1128,6 @@ async function runOptimizePrompt(userText) {
     }
 
     if (finalMeta) {
-      const total =
-        (finalMeta.prompt_tokens || 0) + (finalMeta.completion_tokens || 0);
-      if (total > 0) {
-        tokensBurned += total;
-        renderTotal();
-      }
       const line = formatMetaLine(finalMeta);
       modalStats.textContent =
         `время: ${line.time}, вход: ${line.input}, выход: ${line.output}, ` +
@@ -1147,6 +1214,227 @@ function autoResize() {
   const fits = contentHeight <= maxTwoLines;
   input.style.height = Math.min(contentHeight, maxTwoLines) + 'px';
   input.style.overflowY = fits ? 'hidden' : 'auto';
+}
+
+// ── График размера контекста (Chart.js) ────────────────────────────────────
+let contextChart = null;
+
+const contextLimitPlugin = {
+  id: 'contextLimit',
+  afterDatasetsDraw(chart) {
+    const limit = chart.$contextLimit;
+    if (!limit || limit <= 0) return;
+    const area = chart.chartArea;
+    const yScale = chart.scales.y;
+    let y = yScale.getPixelForValue(limit);
+    let offScale = false;
+    if (y < area.top) {
+      y = area.top + 1;
+      offScale = true;
+    }
+    if (y > area.bottom) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(232, 163, 61, 0.65)';
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(area.left, y);
+    ctx.lineTo(area.right, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(232, 163, 61, 0.9)';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    const label = `лимит ${formatContext(limit)}${offScale ? ' (выше)' : ''}`;
+    ctx.fillText(label, area.right - 4, y - 2);
+    ctx.restore();
+  }
+};
+
+function chartAvailable() {
+  return typeof window.Chart !== 'undefined';
+}
+
+function ensureChart() {
+  if (!chartAvailable() || !chartCanvas) return null;
+  if (contextChart) return contextChart;
+  contextChart = new window.Chart(chartCanvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'Вход',
+          data: [],
+          backgroundColor: '#4f8cff',
+          borderColor: '#4f8cff',
+          borderWidth: 0,
+          barPercentage: 1,
+          categoryPercentage: 1,
+          stack: 'tokens'
+        },
+        {
+          label: 'Выход',
+          data: [],
+          backgroundColor: '#4caf7d',
+          borderColor: '#4caf7d',
+          borderWidth: 0,
+          barPercentage: 1,
+          categoryPercentage: 1,
+          stack: 'tokens'
+        },
+        {
+          label: 'Саммаризация',
+          data: [],
+          backgroundColor: '#e8a33d',
+          borderColor: '#e8a33d',
+          borderWidth: 0,
+          barPercentage: 1,
+          categoryPercentage: 1,
+          stack: 'tokens'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          filter: (item) => item.parsed.y != null,
+          callbacks: {
+            title: (items) => (items.length ? `Сообщение №${items[0].dataIndex + 1}` : ''),
+            label: (item) => {
+              const seg = (item.chart.$turns || [])[item.dataIndex];
+              if (!seg) return '';
+              if (!item.chart.$colorMode) {
+                return `всего: ${formatTokens(seg.total)} ток.`;
+              }
+              if (item.datasetIndex === 0) {
+                return `вход: ${formatTokens(seg.input)} ток.`;
+              }
+              if (item.datasetIndex === 1) {
+                const reasoning =
+                  seg.reasoning > 0 ? ` (рассуждение: ${formatTokens(seg.reasoning)})` : '';
+                return `выход: ${formatTokens(seg.output)} ток.${reasoning}`;
+              }
+              const reasoning =
+                seg.summaryReasoning > 0
+                  ? ` (рассуждение: ${formatTokens(seg.summaryReasoning)})`
+                  : '';
+              return `саммаризация: ${formatTokens(seg.summary)} ток.${reasoning}`;
+            },
+            footer: (items) => {
+              if (!items[0].chart.$colorMode) return '';
+              const seg = (items[0].chart.$turns || [])[items[0].dataIndex];
+              return seg ? `всего: ${formatTokens(seg.total)} ток.` : '';
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          stacked: true,
+          ticks: { color: '#8a919e', maxTicksLimit: 12, maxRotation: 0, font: { size: 10 } },
+          grid: { color: 'rgba(255, 255, 255, 0.05)' }
+        },
+        y: {
+          stacked: true,
+          beginAtZero: true,
+          ticks: { color: '#8a919e', maxTicksLimit: 4, font: { size: 10 } },
+          grid: { color: 'rgba(255, 255, 255, 0.05)' }
+        }
+      }
+    },
+    plugins: [contextLimitPlugin]
+  });
+  return contextChart;
+}
+
+function buildTurns(records) {
+  // Группирует записи о запросах в «ходы» — по одному на сообщение
+  // пользователя. Саммаризационные запросы прикрепляются к следующему
+  // основному; осиротевшая саммаризация (основной запрос упал) образует
+  // ход без основного.
+  const turns = [];
+  let pending = [];
+  for (const record of records) {
+    if (record.kind === 'summary') {
+      pending.push(record);
+    } else {
+      turns.push({ main: record, summaries: pending });
+      pending = [];
+    }
+  }
+  if (pending.length > 0) {
+    turns.push({ main: null, summaries: pending });
+  }
+  return turns;
+}
+
+function turnSegments(turn) {
+  // Разбивка расхода токенов хода на сегменты столбика.
+  const main = turn.main;
+  const input = main && typeof main.prompt_tokens === 'number' ? main.prompt_tokens : 0;
+  const output = main && typeof main.completion_tokens === 'number' ? main.completion_tokens : 0;
+  const reasoning = main && typeof main.reasoning_tokens === 'number' ? main.reasoning_tokens : 0;
+  let summary = 0;
+  let summaryReasoning = 0;
+  for (const r of turn.summaries) {
+    summary += (r.prompt_tokens || 0) + (r.completion_tokens || 0);
+    summaryReasoning += r.reasoning_tokens || 0;
+  }
+  return {
+    input,
+    output,
+    reasoning,
+    summary,
+    summaryReasoning,
+    total: input + output + summary
+  };
+}
+
+function renderChart() {
+  const chat = getActiveChat();
+  const records = (chat && chat.requests) || [];
+
+  if (!chartAvailable() || !chartCanvas) {
+    if (chartEmpty) {
+      chartEmpty.hidden = false;
+      chartEmpty.textContent = 'График недоступен (нет Chart.js)';
+    }
+    return;
+  }
+  if (chartEmpty) chartEmpty.hidden = true;
+
+  const chart = ensureChart();
+  if (!chart) return;
+
+  const turns = buildTurns(records);
+  const segments = turns.map(turnSegments);
+  chart.data.labels = turns.map((_, i) => String(i + 1));
+  if (chartColorMode) {
+    chart.data.datasets[0].label = 'Вход';
+    chart.data.datasets[0].data = segments.map((s) => (s.input > 0 ? s.input : null));
+    chart.data.datasets[1].data = segments.map((s) => (s.output > 0 ? s.output : null));
+    chart.data.datasets[2].data = segments.map((s) => (s.summary > 0 ? s.summary : null));
+  } else {
+    // Моно-режим: один столбик — только суммарные токены сообщения.
+    chart.data.datasets[0].label = 'Всего';
+    chart.data.datasets[0].data = segments.map((s) => (s.total > 0 ? s.total : null));
+    chart.data.datasets[1].data = segments.map(() => null);
+    chart.data.datasets[2].data = segments.map(() => null);
+  }
+  if (chartLegend) chartLegend.hidden = !chartColorMode;
+  const maxTotal = segments.reduce((m, s) => Math.max(m, s.total), 0);
+  chart.options.scales.y.suggestedMax = maxTotal > 0 ? Math.ceil(maxTotal * 1.15) : 10;
+  chart.$contextLimit = chat && chat.model ? modelContext(chat.model) : null;
+  chart.$turns = segments;
+  chart.$colorMode = chartColorMode;
+  chart.update();
 }
 
 // ── Обработчики событий ────────────────────────────────────────────────────
@@ -1287,6 +1575,31 @@ if (modeToggle) {
   modeToggle.addEventListener('change', syncActiveChatSettings);
 }
 
+if (summaryToggle) {
+  summaryToggle.addEventListener('change', () => {
+    updateSummaryFieldState(isEstablished(getActiveChat()));
+    syncActiveChatSettings();
+  });
+}
+
+if (keepRecentInput) {
+  keepRecentInput.addEventListener('input', syncActiveChatSettings);
+}
+
+if (chartColorToggle) {
+  chartColorToggle.checked = chartColorMode;
+  chartColorToggle.addEventListener('change', () => {
+    chartColorMode = chartColorToggle.checked;
+    try {
+      localStorage.setItem(CHART_COLOR_MODE_KEY, chartColorMode ? '1' : '0');
+    } catch {
+      /* localStorage может быть недоступен */
+    }
+    if (chartLegend) chartLegend.hidden = !chartColorMode;
+    renderChart();
+  });
+}
+
 modelButton.addEventListener('click', () => {
   if (modelMenu.hidden) openModelMenu();
   else closeModelMenu();
@@ -1337,6 +1650,7 @@ document.addEventListener('keydown', (e) => {
 // ── Инициализация ──────────────────────────────────────────────────────────
 autoResize();
 renderTotal();
+renderChart();
 loadModels();
 
 async function restoreSessions() {
@@ -1418,6 +1732,9 @@ function sessionTitle(session) {
       sid: session.id,
       title: sessionTitle(session),
       history: [],
+      requests: Array.isArray(session.requests)
+        ? session.requests.map((r) => ({ ...r }))
+        : [],
       renamed: Boolean(session.history && session.history.length > 0),
       kind: session.kind === 'summary' ? 'summary' : 'chat',
       busy: false,
@@ -1439,6 +1756,7 @@ function sessionTitle(session) {
     }
   }
   // Активируем вкладку, открытую у пользователя; иначе — самую свежую.
+  computeTokensTotal();
   const activeChat = (activeId && chats.find((c) => c.sid === activeId)) || mostRecent || chats[0];
   activateChat(activeChat);
 })();

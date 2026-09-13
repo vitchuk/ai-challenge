@@ -8,14 +8,29 @@
 
 from __future__ import annotations
 
+import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import AsyncIterator, Optional
 
 from ..pricing import message_cost
 from ..toon_codec import encode as toon_encode
 from .generation import GenerationSettings
+
+logger = logging.getLogger(__name__)
+
+#: Системный промпт скрытого запроса саммаризации истории.
+SUMMARIZER_SYSTEM_PROMPT = (
+    "Ты — суммаризатор диалога. Сожми нижеприведённую переписку, сохранив "
+    "все факты, решения, имена и незавершённые вопросы. Отвечай только саммари."
+)
+
+#: Рамка служебного сообщения с саммари в основном запросе.
+SUMMARY_MESSAGE_PREFIX = "[Саммари начала диалога]"
+
+#: Сколько накопленных саммари сворачивать в одно метасаммари.
+COLLAPSE_SUMMARIES_AT = 3
 
 
 class SessionKind(str, Enum):
@@ -24,6 +39,56 @@ class SessionKind(str, Enum):
     CHAT = "chat"
     SUMMARY = "summary"
     EPHEMERAL = "ephemeral"
+
+
+@dataclass
+class RequestRecord:
+    """Один запрос к LLM (основной ответ или скрытая саммаризация).
+
+    Используется для графика расхода токенов по сообщениям
+    (``prompt_tokens``/``completion_tokens``/``reasoning_tokens``) и
+    счётчика «Сожжено токенов» (``prompt + completion``).
+    """
+
+    index: int
+    kind: str  # "main" | "summary"
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    created_at: float = 0.0
+    persisted: bool = False
+
+    def to_dict(self) -> dict:
+        """Представляет запись как словарь (для API)."""
+        return {
+            "index": self.index,
+            "kind": self.kind,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, persisted: bool = True) -> "RequestRecord":
+        """Восстанавливает запись из словаря (из БД).
+
+        Args:
+            data: словарь ``{"index", "kind", "prompt_tokens",
+                "completion_tokens", "reasoning_tokens"}``.
+            persisted: считать ли запись уже сохранённой в БД.
+
+        Returns:
+            Экземпляр :class:`RequestRecord`.
+        """
+        return cls(
+            index=data.get("index", 0),
+            kind=data.get("kind", "main"),
+            prompt_tokens=data.get("prompt_tokens"),
+            completion_tokens=data.get("completion_tokens"),
+            reasoning_tokens=data.get("reasoning_tokens"),
+            created_at=data.get("created_at", 0.0),
+            persisted=persisted,
+        )
 
 
 @dataclass
@@ -41,6 +106,7 @@ class MessageMeta:
     reasoning_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
     finish_reason: Optional[str] = None
+    summarized: Optional[bool] = None
 
     def to_dict(self) -> dict:
         """Представляет метаданные как словарь (для TOON/API)."""
@@ -52,6 +118,7 @@ class MessageMeta:
             "reasoning_tokens": self.reasoning_tokens,
             "cost_usd": self.cost_usd,
             "finish_reason": self.finish_reason,
+            "summarized": self.summarized,
         }
 
     @classmethod
@@ -74,6 +141,7 @@ class MessageMeta:
             reasoning_tokens=data.get("reasoning_tokens"),
             cost_usd=data.get("cost_usd"),
             finish_reason=data.get("finish_reason"),
+            summarized=data.get("summarized"),
         )
 
 
@@ -138,6 +206,11 @@ class ChatService:
         self.settings = settings or GenerationSettings()
         self.system_prompt = system_prompt
         self.history: list[MessageRecord] = []
+        self.requests: list[RequestRecord] = []
+        # Состояние чанковой саммаризации: накопленные саммари и число
+        # уже сжатых чанков (по `requests_per_summary` обменов каждый).
+        self.summary_items: list[str] = []
+        self.summarized_chunks: int = 0
         self.busy = False
         self.created_at = time.time()
         self.last_active = time.time()
@@ -225,6 +298,227 @@ class ChatService:
             messages.append({"role": record.role, "content": record.content})
         return messages
 
+    def non_seed_messages(self) -> list[MessageRecord]:
+        """Возвращает историю без начального системного сида.
+
+        Под «сообщениями» для саммаризации понимаются именно эти записи.
+        """
+        if self.history and self.history[0].role == "system":
+            return self.history[1:]
+        return list(self.history)
+
+    def _record_request(self, kind: str, usage) -> RequestRecord:
+        """Добавляет запись о запросе к LLM (для графика/счётчика)."""
+        details = usage.details if usage else None
+        record = RequestRecord(
+            index=len(self.requests) + 1,
+            kind=kind,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=usage.completion_tokens if usage else None,
+            reasoning_tokens=details.reasoning_tokens if details else None,
+            created_at=time.time(),
+        )
+        self.requests.append(record)
+        return record
+
+    async def _run_summarizer(
+        self, runner, spec, settings, messages: list[dict]
+    ) -> Optional[str]:
+        """Выполняет один скрытый запрос саммаризации.
+
+        Args:
+            runner: исполнитель :class:`StreamedCompletion`.
+            spec: описание вызова апстрима (та же модель, что и чат).
+            settings: настройки генерации чата.
+            messages: сообщения для суммаризатора (без системного промпта).
+
+        Returns:
+            Текст саммари или ``None`` при ошибке/пустом ответе (деградация).
+        """
+        # Служебный запрос идёт с параметрами чата, но без JSON-режима:
+        # response_format управляет форматом ответа пользователю, а не саммари.
+        summary_settings = replace(settings, response_format=None)
+        request_messages = [
+            {"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT},
+            *messages,
+        ]
+        parts: list[str] = []
+        usage = None
+        try:
+            async for event in runner.run(spec, request_messages, summary_settings):
+                if event.kind == "delta":
+                    parts.append(event.content)
+                elif event.kind == "usage":
+                    usage = event.usage
+                elif event.kind == "done" and event.usage is not None:
+                    usage = event.usage
+        except Exception as exc:  # noqa: BLE001 - деградация вместо обрыва чата
+            logger.warning("Саммаризация не удалась (деградация): %s", exc)
+            return None
+
+        text = "".join(parts).strip()
+        if not text:
+            logger.warning("Саммаризация вернула пустой текст (деградация)")
+            return None
+
+        self._record_request("summary", usage)
+        return text
+
+    def _chunk_size(self) -> int:
+        """Размер чанка в запросах (из настроек саммаризации)."""
+        context_summary = self.settings.context_summary
+        return context_summary.requests_per_summary if context_summary else 0
+
+    def _request_units(self) -> list[list[MessageRecord]]:
+        """Делит переписку без сида на «запросы» — единицы чанкования.
+
+        Запрос №1 — первое сообщение чата (системный сид): в переписке без
+        сида ему соответствует только ответ ассистента (вводное сообщение),
+        примыкающее к первому чанку; сам текст сида остаётся системным
+        промптом и в саммари не дублируется. Каждый следующий запрос — это
+        обмен «вопрос+ответ». Висящее пользовательское сообщение (ответ ещё
+        не получен) в единицы не входит.
+
+        Returns:
+            Список единиц, каждая — список сообщений (1 для сид-ответа,
+            2 для обычного обмена).
+        """
+        rest = self.non_seed_messages()
+        start = 0
+        while start < len(rest) and rest[start].role != "user":
+            start += 1
+        units: list[list[MessageRecord]] = [[m] for m in rest[:start]]
+        i = start
+        while (
+            i + 1 < len(rest)
+            and rest[i].role == "user"
+            and rest[i + 1].role == "assistant"
+        ):
+            units.append([rest[i], rest[i + 1]])
+            i += 2
+        return units
+
+    def _chunk_messages(self, chunk_index: int, size: int) -> list[dict]:
+        """Сообщения чанка: ``size`` запросов (единиц) начиная с ``chunk_index``."""
+        units = self._request_units()
+        chunk = [
+            m
+            for unit in units[chunk_index * size : (chunk_index + 1) * size]
+            for m in unit
+        ]
+        return [{"role": m.role, "content": m.content} for m in chunk]
+
+    @staticmethod
+    def _summaries_block(items: list[str]) -> str:
+        """Пронумерованный блок саммари (для метасаммари и основного запроса)."""
+        return "\n\n".join(
+            f"Саммари {i + 1}:\n{text}" for i, text in enumerate(items)
+        )
+
+    async def ensure_summaries(self, runner, spec, settings) -> list[str]:
+        """Досчитывает чанковые саммари и сворачивает их при накоплении.
+
+        История делится на чанки по ``requests_per_summary`` завершённых
+        обменов «вопрос+ответ». Перед основным запросом каждый ещё не сжатый
+        завершённый чанк сжимается скрытым запросом, а при накоплении
+        ``COLLAPSE_SUMMARIES_AT`` саммари они сворачиваются в одно
+        метасаммари (цикл повторяется). При сбое деградирует: курсор не
+        двигается, и сообщения соответствующего чанка уйдут в основной
+        запрос без изменений.
+
+        Args:
+            runner: исполнитель :class:`StreamedCompletion`.
+            spec: описание вызова апстрима (та же модель, что и чат).
+            settings: настройки генерации чата.
+
+        Returns:
+            Текущий список саммари (пустой, если саммаризация выключена).
+        """
+        context_summary = settings.context_summary
+        if context_summary is None or not context_summary.enabled:
+            return []
+        size = context_summary.requests_per_summary
+
+        # Единица чанкования — «запрос» (сид-ответ либо обмен «вопрос+ответ»).
+        units = self._request_units()
+        complete_chunks = len(units) // size
+
+        while self.summarized_chunks < complete_chunks:
+            chunk_index = self.summarized_chunks
+            text = await self._run_summarizer(
+                runner, spec, settings, self._chunk_messages(chunk_index, size)
+            )
+            if text is None:
+                break  # деградация: чанк и последующие уйдут вербатим
+            self.summarized_chunks += 1
+            self.summary_items.append(text)
+            if len(self.summary_items) >= COLLAPSE_SUMMARIES_AT:
+                meta = await self._run_summarizer(
+                    runner,
+                    spec,
+                    settings,
+                    [{"role": "user", "content": self._summaries_block(self.summary_items)}],
+                )
+                if meta is not None:
+                    self.summary_items = [meta]
+                # при сбое свёртки саммари остаются и будут свёрнуты позже
+
+        return list(self.summary_items)
+
+    def build_request_messages(
+        self,
+        summary_items: Optional[list[str]] = None,
+        extra_system: Optional[str] = None,
+    ) -> list[dict]:
+        """Собирает массив сообщений для основного запроса.
+
+        Без саммаризации — обычная история (см. :meth:`to_openai_messages`).
+        С саммаризацией — ``[системный промпт] + [рамка со всеми саммари] +
+        [сообщения после курсора сжатых чанков без изменений]``.
+
+        Args:
+            summary_items: текущие саммари (``None`` — саммаризация выключена).
+            extra_system: дополнительный системный промпт (JSON-режим),
+                вставляется самым первым.
+
+        Returns:
+            Список ``{"role", "content"}`` для запроса к апстриму.
+        """
+        if summary_items is None:
+            messages = self.to_openai_messages()
+        else:
+            messages = []
+            if self.history and self.history[0].role == "system":
+                messages.append(
+                    {"role": "system", "content": self.history[0].content}
+                )
+            elif self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            if summary_items:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{SUMMARY_MESSAGE_PREFIX}\n"
+                            f"{self._summaries_block(summary_items)}"
+                        ),
+                    }
+                )
+            # Курсор: сколько сообщений покрыто сжатыми единицами (запросами).
+            units = self._request_units()
+            covered = sum(
+                len(unit)
+                for unit in units[: self.summarized_chunks * self._chunk_size()]
+            )
+            messages.extend(
+                {"role": m.role, "content": m.content}
+                for m in self.non_seed_messages()[covered:]
+            )
+
+        if extra_system:
+            messages.insert(0, {"role": "system", "content": extra_system})
+        return messages
+
     def to_toon_context(self, title: Optional[str] = None) -> str:
         """Сериализует историю с метаданными в строку TOON.
 
@@ -286,6 +580,7 @@ class ChatService:
         spec,
         generation_settings: Optional[GenerationSettings] = None,
         extra_system: Optional[str] = None,
+        summary_items: Optional[list[str]] = None,
     ) -> AsyncIterator[dict]:
         """Выполняет стрим ответа и накапливает события для клиента.
 
@@ -300,6 +595,7 @@ class ChatService:
             generation_settings: параметры для этого запроса (иначе — дефолтные).
             extra_system: дополнительный системный промпт, вставляемый
                 перед остальными сообщениями (например, инструкция JSON-режима).
+            summary_items: накопленные саммари (если включена саммаризация).
 
         Yields:
             Словари событий: ``{"type": ...}``.
@@ -307,9 +603,9 @@ class ChatService:
         settings = generation_settings or self.settings
         self.busy = True
         start_time = time.time()
-        messages = self.to_openai_messages()
-        if extra_system:
-            messages.insert(0, {"role": "system", "content": extra_system})
+        messages = self.build_request_messages(
+            summary_items=summary_items, extra_system=extra_system
+        )
         full = ""
         usage = None
         finish_reason = None
@@ -332,7 +628,10 @@ class ChatService:
             meta = self.build_meta(
                 spec.model_label or spec.model, start_time, usage, finish_reason
             )
+            if summary_items:
+                meta.summarized = True
             self.append_assistant_message(full, meta)
+            self._record_request("main", usage)
             yield {
                 "type": "done",
                 "meta": meta.to_dict(),
