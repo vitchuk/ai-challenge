@@ -23,6 +23,12 @@ class SessionCreateResponse(BaseModel):
     model: Optional[str] = None
 
 
+class BranchRequest(BaseModel):
+    """Тело ``POST /api/sessions/{id}/branch``."""
+
+    title: Optional[str] = None
+
+
 class MessageCreateRequest(BaseModel):
     """Тело ``POST /api/sessions/{id}/messages``."""
 

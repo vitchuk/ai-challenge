@@ -13,6 +13,13 @@
   box-sizing: border-box;
 }
 
+/* Атрибут hidden должен скрывать элемент всегда — даже если у него задан
+   собственный display (flex/inline-flex): иначе панель фактов, кнопка
+   ветвления и заглушка графика остаются видимыми вопреки JS. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -49,10 +56,18 @@ body {
 
 .chat {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   flex: 0 0 60%;
   min-width: 0;
   border-right: 1px solid var(--border);
+}
+
+/* Левая (основная) часть колонки чата. */
+.chat__main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .tabs {
@@ -1090,6 +1105,11 @@ body {
   gap: 10px;
 }
 
+/* Атрибут hidden должен перебивать display: flex у строки. */
+.settings__switch-row[hidden] {
+  display: none;
+}
+
 .settings__switch {
   position: relative;
   display: inline-block;
@@ -1142,6 +1162,184 @@ body {
   color: var(--muted);
 }
 
+/* ── Радиокнопки стратегии контекста ─────────────────────────────────────── */
+.settings__radios {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings__radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings__radio input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.settings__radio-dot {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  position: relative;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.settings__radio-dot::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: scale(0);
+  transition: transform 0.15s ease;
+}
+
+.settings__radio input:checked + .settings__radio-dot {
+  border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(79, 140, 255, 0.35);
+}
+
+.settings__radio input:checked + .settings__radio-dot::after {
+  transform: scale(1);
+}
+
+.settings__radio input:focus-visible + .settings__radio-dot {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings__radio input:disabled + .settings__radio-dot {
+  opacity: 0.55;
+}
+
+.settings__radios--locked .settings__radio {
+  cursor: not-allowed;
+}
+
+/* ── Панель фактов (стратегия facts) ─────────────────────────────────────── */
+.chat__splitter {
+  flex: none;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+}
+
+.chat__splitter::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--border);
+}
+
+.chat__splitter:hover::before,
+.chat__splitter--active::before {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(79, 140, 255, 0.5);
+}
+
+.chat__facts {
+  flex: 0 0 auto;
+  width: 280px;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 12px;
+  background: rgba(15, 17, 21, 0.5);
+  overflow-y: auto;
+}
+
+.chat__facts-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+
+.chat__facts-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.chat__facts-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat__facts-key {
+  color: var(--muted);
+}
+
+/* ── Ветвление (стратегия branching) ─────────────────────────────────────── */
+.chat__branch {
+  flex: none;
+  width: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+
+.chat__branch svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.chat__branch:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(79, 140, 255, 0.25);
+}
+
+.chat__branch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tabs__branch-icon {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--accent);
+}
+
+.tabs__branch-icon svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
 .chartbar {
   flex: none;
   margin: 0 14px 14px;
@@ -1166,6 +1364,44 @@ body {
 .chartbar__title {
   font-weight: 600;
   letter-spacing: 0.3px;
+}
+
+.chartbar__collapse {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chartbar__collapse:hover .chartbar__title {
+  color: var(--text);
+}
+
+.chartbar__chevron {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+}
+
+.chartbar--collapsed .chartbar__chevron {
+  transform: rotate(-45deg);
+}
+
+.chartbar--collapsed {
+  height: auto;
+}
+
+.chartbar--collapsed .chartbar__body {
+  display: none;
 }
 
 .chartbar__head-side {
@@ -1240,6 +1476,10 @@ body {
   background: #e8a33d;
 }
 
+.chartbar__dot--facts {
+  background: #a06be8;
+}
+
 .chartbar__body {
   position: relative;
   flex: 1;
@@ -1261,6 +1501,39 @@ body {
   pointer-events: none;
 }
 
+/* ── Тонкие скроллбары боковых панелей (в стиле проекта) ─────────────────── */
+.tabs,
+.settings,
+.chat__facts {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.tabs::-webkit-scrollbar,
+.settings::-webkit-scrollbar,
+.chat__facts::-webkit-scrollbar {
+  width: 7px;
+}
+
+.tabs::-webkit-scrollbar-track,
+.settings::-webkit-scrollbar-track,
+.chat__facts::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tabs::-webkit-scrollbar-thumb,
+.settings::-webkit-scrollbar-thumb,
+.chat__facts::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 4px;
+}
+
+.tabs::-webkit-scrollbar-thumb:hover,
+.settings::-webkit-scrollbar-thumb:hover,
+.chat__facts::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 140, 255, 0.7);
+}
+
 @media (max-width: 700px) {
   .app {
     flex-direction: column;
@@ -1277,6 +1550,18 @@ body {
   .chat {
     flex: 1;
     border-right: none;
+    flex-direction: column;
+  }
+
+  .chat__splitter {
+    display: none;
+  }
+
+  .chat__facts {
+    width: auto;
+    min-width: 0;
+    max-height: 35%;
+    border-top: 1px solid var(--border);
   }
 
   .settings {

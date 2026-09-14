@@ -451,7 +451,7 @@ async def test_restart_restores_full_history(tmp_path, monkeypatch):
 
 # ── Саммаризация контекста ──────────────────────────────────────────────────
 
-SUMMARY_SETTINGS = {"context_summary": {"enabled": True, "requests_per_summary": 3}}
+SUMMARY_SETTINGS = {"context_strategy": {"strategy": "summarize", "n": 3}}
 
 
 async def test_context_summarization_flow(app, client):
@@ -505,7 +505,7 @@ async def test_context_summarization_flow(app, client):
     ]
 
 
-async def test_context_summary_bound_by_first_message(app, client):
+async def test_context_strategy_bound_by_first_message(app, client):
     sid = (await client.post("/api/sessions", json={})).json()["id"]
     await client.post(
         f"/api/sessions/{sid}/messages",
@@ -516,14 +516,14 @@ async def test_context_summary_bound_by_first_message(app, client):
         json={
             "content": "вопрос",
             "settings": {
-                "context_summary": {"enabled": False, "requests_per_summary": 10}
+                "context_strategy": {"strategy": "sliding", "n": 10, "k": 10}
             },
         },
     )
     assert parse_sse(r.text)[-1]["type"] == "done"
     svc = app.state.registry.get(sid)
-    assert svc.settings.context_summary.enabled is True
-    assert svc.settings.context_summary.requests_per_summary == 3
+    assert svc.settings.context_strategy.strategy == "summarize"
+    assert svc.settings.context_strategy.n == 3
 
 
 async def test_restart_restores_summary_state(tmp_path, monkeypatch):
@@ -569,8 +569,8 @@ async def test_restart_restores_summary_state(tmp_path, monkeypatch):
             "main", "main", "main", "summary", "main",
         ]
         assert state["requests"][3]["reasoning_tokens"] == 100
-        assert state["settings"]["context_summary"] == {
-            "enabled": True, "requests_per_summary": 3,
+        assert state["settings"]["context_strategy"] == {
+            "strategy": "summarize", "n": 3, "k": 10,
         }
 
         # после рестарта готовый чанк не пересчитывается: курсор восстановлен
@@ -583,3 +583,160 @@ async def test_restart_restores_summary_state(tmp_path, monkeypatch):
         ]
         assert len(transport2.requests) == 1  # только основной запрос, без саммари
     await app2.state.http_client.aclose()
+
+
+# ── Стратегии: sliding, facts, branching ────────────────────────────────────
+
+SLIDING_SETTINGS = {"context_strategy": {"strategy": "sliding", "n": 3}}
+
+
+async def test_sliding_window_context(app, client):
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    # сид + 4 завершённые реплики
+    for i in range(5):
+        r = await client.post(
+            f"/api/sessions/{sid}/messages",
+            json={"content": f"вопрос {i}", "settings": SLIDING_SETTINGS},
+        )
+        assert parse_sse(r.text)[-1]["type"] == "done"
+
+    transport = app.state.mock_transport
+    r = await client.post(
+        f"/api/sessions/{sid}/messages",
+        json={"content": "вопрос 5", "settings": SLIDING_SETTINGS},
+    )
+    assert parse_sse(r.text)[-1]["type"] == "done"
+    body = json.loads(transport.requests[-1].content)
+    # сид (обмен №1) выпал из окна; уходят последние 3 обмена + новое
+    assert [m["content"] for m in body["messages"]] == [
+        "вопрос 2", "Ответ", "вопрос 3", "Ответ", "вопрос 4", "Ответ", "вопрос 5",
+    ]
+    assert all(m["role"] != "system" for m in body["messages"])
+
+
+async def test_facts_strategy_flow_and_restart(tmp_path, monkeypatch):
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import FakeStream, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+    db = str(tmp_path / "chats.db")
+
+    class FactsTransport(httpx.AsyncBaseTransport):
+        """Основной ответ — «Ответ»; запрос экстрактора — JSON-массив."""
+
+        def __init__(self):
+            self.requests = []
+
+        async def handle_async_request(self, request):
+            self.requests.append(request)
+            body = json.loads(request.content)
+            is_facts = any(
+                "экстрактор фактов" in m.get("content", "")
+                for m in body.get("messages", [])
+            )
+            text = '{"Имя": "Аня", "Город": "Москва"}' if is_facts else "Ответ"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=FakeStream(make_chat_chunks(content=text, usage=USAGE)),
+                request=request,
+            )
+
+    def build():
+        application = create_app()
+        transport = FactsTransport()
+        application.state.http_client = httpx.AsyncClient(transport=transport)
+        application.state.opencode_session_id = "s"
+        application.state.registry = SessionRegistry(
+            config.get_settings(), store=SessionStore(db)
+        )
+        application.state.registry.restore()
+        return application, transport
+
+    settings = {"context_strategy": {"strategy": "facts", "n": 5, "k": 2}}
+    app1, _ = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://t") as c1:
+        sid = (await c1.post("/api/sessions", json={})).json()["id"]
+        r = await c1.post(
+            f"/api/sessions/{sid}/messages",
+            json={"content": "меня зовут Аня", "settings": settings},
+        )
+        events = parse_sse(r.text)
+        facts_events = [e for e in events if e["type"] == "facts"]
+        assert facts_events and facts_events[0]["items"] == [
+            ["Имя", "Аня"], ["Город", "Москва"],
+        ]
+        kinds = [e["record"]["kind"] for e in events if e["type"] == "request_log"]
+        assert kinds == ["main", "facts"]
+        state = (await c1.get(f"/api/sessions/{sid}")).json()
+        assert state["facts"] == [["Имя", "Аня"], ["Город", "Москва"]]
+    await app1.state.http_client.aclose()
+
+    # рестарт сервера: факты восстановлены
+    app2, _ = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://t") as c2:
+        state = (await c2.get(f"/api/sessions/{sid}")).json()
+        assert state["facts"] == [["Имя", "Аня"], ["Город", "Москва"]]
+    await app2.state.http_client.aclose()
+
+
+async def test_branch_session(app, client):
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    branch_settings = {
+        "temperature": 0.4,
+        "context_strategy": {"strategy": "branching"},
+    }
+    for i in range(2):
+        r = await client.post(
+            f"/api/sessions/{sid}/messages",
+            json={"content": f"вопрос {i}", "settings": branch_settings},
+        )
+        assert parse_sse(r.text)[-1]["type"] == "done"
+
+    r = await client.post(f"/api/sessions/{sid}/branch", json={"title": "Ветка"})
+    assert r.status_code == 201
+    bid = r.json()["id"]
+    assert bid != sid
+
+    state = (await client.get(f"/api/sessions/{bid}")).json()
+    assert state["title"] == "Ветка"
+    assert state["parent_id"] == sid
+    assert state["model"] == "opencode/glm-5.3"
+    assert state["settings"]["context_strategy"]["strategy"] == "branching"
+    assert state["settings"]["temperature"] == 0.4
+    # история скопирована, журнал запросов — нет
+    assert [m["content"] for m in state["history"]] == [
+        "вопрос 0", "Ответ", "вопрос 1", "Ответ",
+    ]
+    assert state["requests"] == []
+
+    # оригинал не изменён
+    orig = (await client.get(f"/api/sessions/{sid}")).json()
+    assert orig["title"] is None
+    assert orig["parent_id"] is None
+
+    # ветвиться можно и от ветки (цепочки)
+    r2 = await client.post(f"/api/sessions/{bid}/branch", json={})
+    assert r2.status_code == 201
+    child = (await client.get(f"/api/sessions/{r2.json()['id']}")).json()
+    assert child["parent_id"] == bid
+
+
+async def test_branch_errors(app, client):
+    assert (await client.post("/api/sessions/nope/branch", json={})).status_code == 404
+    summary = (
+        await client.post("/api/sessions", json={"kind": "summary"})
+    ).json()["id"]
+    assert (
+        await client.post(f"/api/sessions/{summary}/branch", json={})
+    ).status_code == 400

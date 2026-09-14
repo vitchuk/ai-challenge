@@ -51,28 +51,61 @@ def test_non_dict_returns_defaults():
     assert s.to_upstream() == {}
 
 
-def test_context_summary_valid():
-    s = sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 7}})
-    assert s.context_summary is not None
-    assert s.context_summary.enabled is True
-    assert s.context_summary.requests_per_summary == 7
-    assert s.to_dict()["context_summary"] == {"enabled": True, "requests_per_summary": 7}
+def test_context_strategy_valid():
+    s = sanitize_settings(
+        {"context_strategy": {"strategy": "sliding", "n": 7, "k": 3}}
+    )
+    assert s.context_strategy is not None
+    assert s.context_strategy.strategy == "sliding"
+    assert s.context_strategy.n == 7
+    assert s.context_strategy.k == 3
+    assert s.to_dict()["context_strategy"] == {
+        "strategy": "sliding", "n": 7, "k": 3,
+    }
 
 
-def test_context_summary_clamped_and_defaulted():
-    assert sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 0}}).context_summary.requests_per_summary == 1
-    assert sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 99}}).context_summary.requests_per_summary == 20
-    # невалидный requests_per_summary -> дефолт 5
-    assert sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": "x"}}).context_summary.requests_per_summary == 5
+def test_context_strategy_invalid_falls_back_to_none():
+    s = sanitize_settings({"context_strategy": {"strategy": "bogus", "n": 5}})
+    assert s.context_strategy.strategy == "none"
+    assert sanitize_settings({}).context_strategy is None
 
 
-def test_context_summary_enabled_must_be_bool():
-    s = sanitize_settings({"context_summary": {"enabled": "yes", "requests_per_summary": 3}})
-    assert s.context_summary.enabled is False
-    assert sanitize_settings({"context_summary": None}).context_summary is None
-    assert sanitize_settings({"context_summary": {}}).context_summary.enabled is False
+def test_context_strategy_params_clamped_and_defaulted():
+    s = sanitize_settings({"context_strategy": {"strategy": "sliding", "n": 99, "k": 0}})
+    assert s.context_strategy.n == 20
+    assert s.context_strategy.k == 1
+    # невалидные параметры -> дефолты (n=5 для summarize, n=10 для sliding, k=10)
+    assert sanitize_settings({"context_strategy": {"strategy": "summarize", "n": "x"}}).context_strategy.n == 5
+    assert sanitize_settings({"context_strategy": {"strategy": "sliding", "n": "x"}}).context_strategy.n == 10
+    assert sanitize_settings({"context_strategy": {"strategy": "facts", "k": "x"}}).context_strategy.k == 10
 
 
-def test_context_summary_not_upstream():
-    s = sanitize_settings({"context_summary": {"enabled": True, "requests_per_summary": 3}})
-    assert "context_summary" not in s.to_upstream()
+def test_legacy_context_summary_migrates():
+    # включённая старая саммаризация -> strategy=summarize с n
+    s = sanitize_settings(
+        {"context_summary": {"enabled": True, "requests_per_summary": 3}}
+    )
+    assert s.context_strategy.strategy == "summarize"
+    assert s.context_strategy.n == 3
+    # выключенная -> none
+    s = sanitize_settings(
+        {"context_summary": {"enabled": False, "requests_per_summary": 3}}
+    )
+    assert s.context_strategy.strategy == "none"
+    # самый старый ключ keep_recent тоже поддерживается при миграции
+    s = sanitize_settings({"context_summary": {"enabled": True, "keep_recent": 4}})
+    assert s.context_strategy.n == 4
+
+
+def test_context_strategy_wins_over_legacy():
+    s = sanitize_settings({
+        "context_summary": {"enabled": True, "requests_per_summary": 3},
+        "context_strategy": {"strategy": "facts", "n": 5, "k": 2},
+    })
+    assert s.context_strategy.strategy == "facts"
+    assert s.context_strategy.k == 2
+
+
+def test_context_strategy_not_upstream():
+    s = sanitize_settings({"context_strategy": {"strategy": "sliding", "n": 3}})
+    assert "context_strategy" not in s.to_upstream()

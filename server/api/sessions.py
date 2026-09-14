@@ -12,7 +12,12 @@ from fastapi.responses import StreamingResponse
 from ..providers import UnsupportedModelError, resolve_provider
 from ..providers.base import ProviderError
 from ..providers.client import StreamedCompletion
-from ..schemas import MessageCreateRequest, SessionCreateRequest, SessionCreateResponse
+from ..schemas import (
+    BranchRequest,
+    MessageCreateRequest,
+    SessionCreateRequest,
+    SessionCreateResponse,
+)
 from ..services import ChatService, SessionKind, sanitize_settings
 from ..services.registry import SessionRegistry
 
@@ -135,6 +140,9 @@ async def list_sessions(request: Request) -> dict:
                 "last_active": session.last_active,
                 "history": [m.to_dict() for m in session.history],
                 "requests": [r.to_dict() for r in session.requests],
+                "facts": list(session.facts),
+                "title": session.title,
+                "parent_id": session.parent_id,
             }
         )
     return {"data": data, "active_id": registry.get_active()}
@@ -180,7 +188,37 @@ async def get_session(session_id: str, request: Request) -> dict:
         "last_active": session.last_active,
         "history": [m.to_dict() for m in session.history],
         "requests": [r.to_dict() for r in session.requests],
+        "facts": list(session.facts),
+        "title": session.title,
+        "parent_id": session.parent_id,
     }
+
+
+@router.post("/{session_id}/branch", status_code=201, response_model=SessionCreateResponse)
+async def branch_session(
+    session_id: str, body: BranchRequest, request: Request
+) -> SessionCreateResponse:
+    """Создаёт чат-снапшот (ветку) от существующего обычного чата.
+
+    Args:
+        session_id: идентификатор исходной сессии.
+        body: название новой вкладки (необязательно).
+        request: HTTP-запрос.
+
+    Returns:
+        Идентификатор и модель нового чата.
+
+    Raises:
+        HTTPException: 404 — сессия не найдена; 400 — не обычный чат.
+    """
+    registry: SessionRegistry = request.app.state.registry
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+    if session.kind != SessionKind.CHAT:
+        raise HTTPException(400, "Only chat sessions can be branched")
+    branch = registry.branch(session, body.title)
+    return SessionCreateResponse(id=branch.id, model=branch.model)
 
 
 @router.delete("/{session_id}", status_code=204)
@@ -207,7 +245,7 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
 
     Returns:
         Поток Server-Sent Events с событиями ``session/reasoning_start/
-        reasoning_end/request_log/done/error``.
+        reasoning_end/request_log/done/facts/error``.
     """
     registry: SessionRegistry = request.app.state.registry
     session = registry.get(session_id)
@@ -289,7 +327,17 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
                 yield _sse(event)
             # Успешное завершение: сохраняем пару user+assistant и записи.
             registry.remember_pair(session)
+            # Стратегия facts: после ответа обновляем канонические факты.
+            updated_facts = await session.extract_facts(
+                runner, spec, gen_settings, body.content
+            )
+            if updated_facts is not None:
+                registry.persist_facts(session)
             registry.persist_new_requests(session)
+            for frame in drain_request_logs():
+                yield frame
+            if updated_facts is not None:
+                yield _sse({"type": "facts", "items": updated_facts})
         except ProviderError as exc:
             session.rollback_user_message()
             registry.persist_new_requests(session)

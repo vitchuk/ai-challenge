@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
+import copy
 import secrets
 from typing import Optional
 
 from ..config import Settings
 from ..toon_codec import encode as toon_encode
-from .chat_service import ChatService, SessionKind
+from .chat_service import ChatService, MessageRecord, SessionKind
 from .storage import SessionStore
 
 SUMMARY_CONTEXT_PROMPT = (
@@ -196,6 +197,78 @@ class SessionRegistry:
             self._store.save_summary_state(
                 chat.id, chat.summarized_chunks, chat.summary_items
             )
+
+    def persist_facts(self, chat: ChatService) -> None:
+        """Персистит канонические факты чата (стратегия facts).
+
+        Args:
+            chat: сессия со списком ``facts``.
+        """
+        if self._store is None or chat.kind == SessionKind.EPHEMERAL:
+            return
+        self._store.save_facts(chat.id, chat.facts)
+
+    def branch(self, chat: ChatService, title: Optional[str] = None) -> ChatService:
+        """Создаёт чат-снапшот (ветку) от существующего чата.
+
+        Копируются история (включая сид), системный промпт, модель, настройки,
+        состояние чанковой саммаризации и факты. Журнал запросов **не**
+        копируется — график и «Сожжено токенов» нового чата начинаются с нуля.
+        Исходный чат не изменяется.
+
+        Args:
+            chat: исходный чат.
+            title: название новой вкладки (иначе — из первого сообщения).
+
+        Returns:
+            Новый :class:`ChatService`.
+        """
+        chat_id = secrets.token_hex(8)
+        while chat_id in self._sessions:
+            chat_id = secrets.token_hex(8)
+        new = ChatService(
+            chat_id=chat_id,
+            kind=SessionKind.CHAT,
+            model=chat.model,
+            settings=copy.deepcopy(chat.settings),
+            system_prompt=chat.system_prompt,
+        )
+        new.parent_id = chat.id
+        new.title = title or self._derive_title(chat)
+        new.history = [
+            MessageRecord(
+                role=record.role,
+                content=record.content,
+                meta=record.meta,
+                created_at=record.created_at,
+            )
+            for record in chat.history
+        ]
+        new.summarized_chunks = chat.summarized_chunks
+        new.summary_items = list(chat.summary_items)
+        new.facts = list(chat.facts)
+
+        self._sessions[chat_id] = new
+        if self._store is not None:
+            self._store.save_session(new)
+            self._store.save_history(new.id, new.history)
+            if new.summarized_chunks > 0 or new.summary_items:
+                self._store.save_summary_state(
+                    new.id, new.summarized_chunks, new.summary_items
+                )
+            if new.facts:
+                self._store.save_facts(new.id, new.facts)
+        return new
+
+    @staticmethod
+    def _derive_title(chat: ChatService) -> str:
+        """Название для ветки из первого сообщения истории."""
+        for record in chat.history:
+            if record.role in ("user", "system"):
+                title = " ".join(record.content.split()).strip()
+                if title:
+                    return title
+        return "Новый чат"
 
     def build_summary_context(self, exclude_id: str) -> str:
         """Собирает TOON-контекст из всех сессий, кроме ``exclude_id``.
