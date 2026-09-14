@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS session_summary_state (
     updated_at  REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_facts (
+    session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    items       TEXT NOT NULL DEFAULT '[]',
+    updated_at  REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -76,6 +82,8 @@ CREATE TABLE IF NOT EXISTS app_state (
 # EXISTS` существующую таблицу не изменяет). Формат: (таблица, колонка, тип).
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("llm_requests", "reasoning_tokens", "INTEGER"),
+    ("sessions", "parent_id", "TEXT"),
+    ("sessions", "title", "TEXT"),
 ]
 
 # Устаревшие таблицы, которые удаляются при открытии БД.
@@ -130,14 +138,18 @@ class SessionStore:
             return
         self._conn.execute(
             """
-            INSERT INTO sessions (id, kind, model, system_prompt, settings, created_at, last_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions
+                (id, kind, model, system_prompt, settings, created_at,
+                 last_active, parent_id, title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 kind = excluded.kind,
                 model = excluded.model,
                 system_prompt = excluded.system_prompt,
                 settings = excluded.settings,
-                last_active = excluded.last_active
+                last_active = excluded.last_active,
+                parent_id = excluded.parent_id,
+                title = excluded.title
             """,
             (
                 chat.id,
@@ -147,6 +159,8 @@ class SessionStore:
                 json.dumps(chat.settings.to_dict(), ensure_ascii=False),
                 getattr(chat, "created_at", chat.last_active),
                 chat.last_active,
+                getattr(chat, "parent_id", None),
+                getattr(chat, "title", None),
             ),
         )
         self._conn.commit()
@@ -242,6 +256,51 @@ class SessionStore:
         )
         self._conn.commit()
 
+    def save_facts(self, session_id: str, items: list[str]) -> None:
+        """Сохраняет (upsert) список фактов сессии (стратегия facts).
+
+        Args:
+            session_id: идентификатор сессии.
+            items: канонические факты.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO session_facts (session_id, items, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                items = excluded.items,
+                updated_at = excluded.updated_at
+            """,
+            (session_id, json.dumps(items, ensure_ascii=False), time.time()),
+        )
+        self._conn.commit()
+
+    def save_history(self, session_id: str, records: list[MessageRecord]) -> None:
+        """Перезаписывает историю сессии целиком (для снапшота при ветвлении).
+
+        Args:
+            session_id: идентификатор сессии.
+            records: полная история сообщений.
+        """
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM messages WHERE session_id = ?", (session_id,)
+            )
+            for record in records:
+                self._conn.execute(
+                    "INSERT INTO messages (session_id, role, content, meta, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        session_id,
+                        record.role,
+                        record.content,
+                        json.dumps(record.meta.to_dict(), ensure_ascii=False)
+                        if record.meta is not None
+                        else None,
+                        record.created_at,
+                    ),
+                )
+
     def delete_session(self, session_id: str) -> bool:
         """Удаляет сессию вместе с сообщениями.
 
@@ -312,6 +371,8 @@ class SessionStore:
                 system_prompt=row["system_prompt"],
             )
             chat.last_active = row["last_active"]
+            chat.parent_id = row["parent_id"]
+            chat.title = row["title"]
             messages = self._conn.execute(
                 "SELECT role, content, meta, created_at FROM messages WHERE session_id = ? ORDER BY id",
                 (row["id"],),
@@ -353,5 +414,18 @@ class SessionStore:
                 loaded_items = json.loads(summary["items"] or "[]")
                 if isinstance(loaded_items, list):
                     chat.summary_items = [str(item) for item in loaded_items]
+            facts_row = self._conn.execute(
+                "SELECT items FROM session_facts WHERE session_id = ?",
+                (row["id"],),
+            ).fetchone()
+            if facts_row is not None:
+                loaded_facts = json.loads(facts_row["items"] or "[]")
+                if isinstance(loaded_facts, list):
+                    chat.facts = [
+                        item if isinstance(item, str) else [str(x) for x in item]
+                        for item in loaded_facts
+                        if isinstance(item, str)
+                        or (isinstance(item, (list, tuple)) and len(item) == 2)
+                    ]
             result.append(chat)
         return result

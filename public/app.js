@@ -13,8 +13,13 @@ const tempValue = document.getElementById('temperature-value');
 const topPRange = document.getElementById('setting-top-p');
 const topPValue = document.getElementById('top-p-value');
 const topKInput = document.getElementById('setting-top-k');
-const summaryToggle = document.getElementById('setting-summary');
-const keepRecentInput = document.getElementById('setting-keep-recent');
+const strategyRadios = Array.from(
+  document.querySelectorAll('input[name="context-strategy"]')
+);
+const strategyParamRow = document.getElementById('strategy-param-row');
+const strategyParamInput = document.getElementById('strategy-param');
+const strategyParamLabel = document.getElementById('strategy-param-label');
+const strategyHint = document.getElementById('strategy-hint');
 const maxTokensInput = document.getElementById('setting-max-tokens');
 const stopInput = document.getElementById('setting-stop');
 const modeToggle = document.getElementById('setting-mode');
@@ -23,10 +28,18 @@ const newChatBtn = document.getElementById('new-chat');
 const summarizeBtn = document.getElementById('summarize');
 const tabsListEl = document.getElementById('tabs-list');
 const chatInfoEl = document.getElementById('chat-info');
+const chatColumn = document.getElementById('chat-column');
+const factsPanel = document.getElementById('facts-panel');
+const factsList = document.getElementById('facts-list');
+const factsEmpty = document.getElementById('facts-empty');
+const factsSplitter = document.getElementById('facts-splitter');
+const branchBtn = document.getElementById('branch-btn');
 const chartCanvas = document.getElementById('context-chart');
 const chartEmpty = document.getElementById('chart-empty');
 const chartColorToggle = document.getElementById('chart-color-mode');
 const chartLegend = document.querySelector('.chartbar__legend');
+const chartCollapseBtn = document.getElementById('chart-collapse');
+const chartbarEl = document.querySelector('.chartbar');
 const commandMenu = document.getElementById('command-menu');
 const commandModal = document.getElementById('command-modal');
 const modalBody = document.getElementById('modal-body');
@@ -104,6 +117,33 @@ try {
   chartColorMode = false;
 }
 
+const CHART_COLLAPSED_KEY = 'pomogator2k:chart-collapsed';
+let chartCollapsed = true; // по умолчанию блок свёрнут
+try {
+  chartCollapsed = localStorage.getItem(CHART_COLLAPSED_KEY) !== '0';
+} catch {
+  chartCollapsed = true;
+}
+
+const FACTS_PANEL_WIDTH_KEY = 'pomogator2k:facts-panel-width';
+// Значения N/K по стратегиям (дефолты: саммаризация 5, sliding 10, facts 10).
+let strategyParams = { summarize: 5, sliding: 10, facts: 10 };
+
+const STRATEGY_HINTS = {
+  none: 'вся история в контексте',
+  summarize: 'каждые {N} запросов сжимаются в саммари',
+  sliding: 'в контексте только последние {N} реплик пользователя с ответами',
+  facts: 'факты + последние {K} реплик пользователя с ответами',
+  branching: 'вся история + ветвление чатов'
+};
+
+// Общая иконка ветки (git-branch) — для вкладок и кнопки ветвления.
+const BRANCH_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/>' +
+  '<circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
+
 const chats = [];
 let activeChatId = null;
 let chatCounter = 0;
@@ -164,14 +204,54 @@ function collectSettings() {
     .filter(Boolean);
   if (stop.length > 0) settings.stop = stop;
   if (!modeToggle.checked) settings.response_format = { type: 'json_object' };
-  if (summaryToggle) {
-    const requests = parseInt(keepRecentInput.value, 10);
-    settings.context_summary = {
-      enabled: summaryToggle.checked,
-      requests_per_summary: Number.isInteger(requests) ? requests : 5
-    };
-  }
+  const strategy = currentStrategy();
+  settings.context_strategy = {
+    strategy,
+    n: strategy === 'sliding' ? strategyParams.sliding : strategyParams.summarize,
+    k: strategyParams.facts
+  };
   return settings;
+}
+
+function currentStrategy() {
+  const checked = strategyRadios.find((r) => r.checked);
+  return checked ? checked.value : 'none';
+}
+
+function setStrategyRadio(strategy) {
+  for (const radio of strategyRadios) radio.checked = radio.value === strategy;
+}
+
+function clampStrategyParam(value, fallback) {
+  return Number.isInteger(value) ? Math.min(20, Math.max(1, value)) : fallback;
+}
+
+function strategyParamValue(strategy) {
+  return strategyParams[strategy] || (strategy === 'summarize' ? 5 : 10);
+}
+
+function updateStrategyHint() {
+  if (!strategyHint) return;
+  const strategy = currentStrategy();
+  const value = strategyParamValue(strategy);
+  strategyHint.textContent = (STRATEGY_HINTS[strategy] || '')
+    .replace('{N}', value)
+    .replace('{K}', value);
+}
+
+function updateStrategyParamUI() {
+  const strategy = currentStrategy();
+  const withParam =
+    strategy === 'summarize' || strategy === 'sliding' || strategy === 'facts';
+  if (strategyParamRow) strategyParamRow.hidden = !withParam;
+  if (strategyParamInput) {
+    strategyParamInput.value = String(strategyParamValue(strategy));
+  }
+  if (strategyParamLabel) {
+    strategyParamLabel.textContent =
+      strategy === 'facts' || strategy === 'sliding' ? 'реплик' : 'запросов';
+  }
+  updateStrategyHint();
 }
 
 function collectSystemPrompt() {
@@ -195,8 +275,9 @@ function resetChatPanel() {
   if (topKInput) topKInput.value = '';
   if (maxTokensInput) maxTokensInput.value = '';
   if (stopInput) stopInput.value = '';
-  if (summaryToggle) summaryToggle.checked = false;
-  if (keepRecentInput) keepRecentInput.value = '5';
+  setStrategyRadio('none');
+  strategyParams = { summarize: 5, sliding: 10, facts: 10 };
+  updateStrategyParamUI();
 }
 
 function defaultChatSettings() {
@@ -207,14 +288,16 @@ function defaultChatSettings() {
     max_tokens: null,
     stop: [],
     response_format: null,
-    context_summary: { enabled: false, requests_per_summary: 5 }
+    context_strategy: { strategy: 'none', n: 5, k: 10 }
   };
 }
 
 function normalizeServerSettings(s) {
   const def = defaultChatSettings();
   if (!s || typeof s !== 'object') return def;
-  const cs = s.context_summary;
+  const cs = s.context_strategy;
+  const strategies = ['none', 'summarize', 'sliding', 'facts', 'branching'];
+  const strategy = cs && strategies.includes(cs.strategy) ? cs.strategy : 'none';
   return {
     temperature: typeof s.temperature === 'number' ? s.temperature : def.temperature,
     top_p: typeof s.top_p === 'number' ? s.top_p : def.top_p,
@@ -222,12 +305,10 @@ function normalizeServerSettings(s) {
     max_tokens: s.max_tokens || null,
     stop: Array.isArray(s.stop) ? s.stop : [],
     response_format: s.response_format || null,
-    context_summary: {
-      enabled: Boolean(cs && cs.enabled),
-      requests_per_summary:
-        cs && Number.isInteger(cs.requests_per_summary)
-          ? Math.min(20, Math.max(1, cs.requests_per_summary))
-          : 5
+    context_strategy: {
+      strategy,
+      n: clampStrategyParam(cs && cs.n, 5),
+      k: clampStrategyParam(cs && cs.k, 10)
     }
   };
 }
@@ -248,29 +329,35 @@ function applyChatSettings(chat) {
   if (topKInput) topKInput.value = s.top_k ? String(s.top_k) : '';
   if (maxTokensInput) maxTokensInput.value = s.max_tokens ? String(s.max_tokens) : '';
   if (stopInput) stopInput.value = Array.isArray(s.stop) ? s.stop.join(', ') : '';
-  const cs = s.context_summary || defaultChatSettings().context_summary;
-  if (summaryToggle) summaryToggle.checked = Boolean(cs.enabled);
-  if (keepRecentInput) keepRecentInput.value = String(cs.requests_per_summary || 5);
+  const cs = s.context_strategy || defaultChatSettings().context_strategy;
+  setStrategyRadio(cs.strategy);
+  if (cs.strategy === 'sliding') {
+    strategyParams.sliding = clampStrategyParam(cs.n, 10);
+  } else if (cs.strategy === 'summarize') {
+    strategyParams.summarize = clampStrategyParam(cs.n, 5);
+  }
+  strategyParams.facts = clampStrategyParam(cs.k, 10);
+  updateStrategyParamUI();
 }
 
 function isEstablished(chat) {
   return Boolean(chat && chat.history && chat.history.length > 0);
 }
 
-function updateSummaryFieldState(locked) {
-  if (!keepRecentInput) return;
-  keepRecentInput.disabled = locked || !summaryToggle.checked;
-}
-
 function updateSettingsLock() {
   const chat = getActiveChat();
   const locked = isEstablished(chat);
   // Привязываемые первым сообщением контролы: модель, temperature,
-  // top_p, top_k, саммаризация (тумблер + N).
-  for (const el of [modelButton, tempRange, topPRange, topKInput, summaryToggle]) {
+  // top_p, top_k и стратегия контекста (радио + параметр N/K).
+  for (const el of [modelButton, tempRange, topPRange, topKInput]) {
     if (el) el.disabled = locked;
   }
-  updateSummaryFieldState(locked);
+  for (const radio of strategyRadios) radio.disabled = locked;
+  if (strategyParamInput) strategyParamInput.disabled = locked;
+  if (strategyRadios[0]) {
+    const group = strategyRadios[0].closest('.settings__radios');
+    if (group) group.classList.toggle('settings__radios--locked', locked);
+  }
   if (modelDropdown) modelDropdown.dataset.locked = locked ? 'true' : 'false';
   if (locked) closeModelMenu();
 }
@@ -649,6 +736,7 @@ function renderTabs() {
     close.textContent = '×';
     close.title = 'Закрыть чат';
 
+    if (chat.parentId) li.appendChild(branchIcon());
     li.appendChild(title);
     li.appendChild(close);
     tabsListEl.appendChild(li);
@@ -671,6 +759,7 @@ function activateChat(chat) {
   updateSettingsLock();
   renderChatInfo();
   renderChart();
+  updateChatLayout();
   // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
   if (chat.sid) {
     apiActivateSession(chat.sid).catch((err) => {
@@ -702,6 +791,175 @@ async function closeChat(chat) {
   } else {
     renderTabs();
   }
+}
+
+// ── Стратегии: раскладка, панель фактов, ветвление ─────────────────────────
+function chatStrategy() {
+  const chat = getActiveChat();
+  const cs =
+    chat && chat.kind === 'chat' && chat.settings && chat.settings.context_strategy;
+  return cs && cs.strategy ? cs.strategy : 'none';
+}
+
+function updateChatLayout() {
+  const chat = getActiveChat();
+  const strategy = chatStrategy();
+  // Панель фактов — как только выбрана стратегия facts (в т.ч. до первого
+  // сообщения); кнопка ветвления — только у начатого чата.
+  const showFacts = strategy === 'facts';
+  if (factsPanel) factsPanel.hidden = !showFacts;
+  if (factsSplitter) factsSplitter.hidden = !showFacts;
+  if (chatColumn) chatColumn.classList.toggle('chat--facts', showFacts);
+  if (showFacts) {
+    renderFactsPanel(chat);
+    applyFactsWidth();
+  }
+  if (branchBtn) {
+    branchBtn.hidden = strategy !== 'branching' || !isEstablished(chat);
+    branchBtn.disabled = Boolean(chat && chat.busy);
+  }
+}
+
+function renderFactsPanel(chat) {
+  if (!factsList || !factsEmpty) return;
+  const facts = (chat && chat.facts) || [];
+  factsList.innerHTML = '';
+  for (const fact of facts) {
+    const li = document.createElement('li');
+    if (Array.isArray(fact) && fact.length === 2) {
+      const key = document.createElement('span');
+      key.className = 'chat__facts-key';
+      key.textContent = `${fact[0]}:`;
+      const value = document.createElement('span');
+      value.textContent = ` ${fact[1]}`;
+      li.append(key, value);
+    } else {
+      li.textContent = String(fact);
+    }
+    factsList.appendChild(li);
+  }
+  factsList.hidden = facts.length === 0;
+  factsEmpty.hidden = facts.length > 0;
+}
+
+function factsWidthBounds() {
+  const total = chatColumn ? chatColumn.clientWidth : 0;
+  return { min: 180, max: Math.max(180, total - 260) };
+}
+
+function applyFactsWidth() {
+  if (!factsPanel) return;
+  let width = NaN;
+  try {
+    width = parseInt(localStorage.getItem(FACTS_PANEL_WIDTH_KEY), 10);
+  } catch {
+    width = NaN;
+  }
+  if (!Number.isInteger(width) || width <= 0) return;
+  const { min, max } = factsWidthBounds();
+  factsPanel.style.width = Math.min(Math.max(width, min), max) + 'px';
+}
+
+if (factsSplitter) {
+  factsSplitter.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    factsSplitter.classList.add('chat__splitter--active');
+    const onMove = (moveEvent) => {
+      const rect = chatColumn.getBoundingClientRect();
+      const { min, max } = factsWidthBounds();
+      const width = Math.min(Math.max(rect.right - moveEvent.clientX, min), max);
+      factsPanel.style.width = width + 'px';
+    };
+    const onUp = () => {
+      factsSplitter.classList.remove('chat__splitter--active');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      try {
+        localStorage.setItem(
+          FACTS_PANEL_WIDTH_KEY,
+          String(parseInt(factsPanel.style.width, 10) || 280)
+        );
+      } catch {
+        /* localStorage может быть недоступен */
+      }
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+async function apiBranchSession(sid, title) {
+  logClient('send', `POST /api/sessions/${sid}/branch`, { title });
+  const res = await fetch(`/api/sessions/${sid}/branch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Ошибка ${res.status}`);
+  }
+  const data = await res.json();
+  logClient('receive', `POST /api/sessions/${sid}/branch → 201`, data);
+  return data;
+}
+
+async function apiGetSession(sid) {
+  const res = await fetch(`/api/sessions/${sid}`);
+  if (!res.ok) throw new Error(`Ошибка ${res.status}`);
+  return res.json();
+}
+
+function makeChatFromSession(session) {
+  const chat = {
+    id: `chat-${++chatCounter}`,
+    sid: session.id,
+    title: session.title || sessionTitle(session),
+    parentId: session.parent_id || null,
+    history: [],
+    requests: Array.isArray(session.requests)
+      ? session.requests.map((r) => ({ ...r }))
+      : [],
+    facts: Array.isArray(session.facts) ? [...session.facts] : [],
+    renamed: Boolean(session.history && session.history.length > 0),
+    kind: session.kind === 'summary' ? 'summary' : 'chat',
+    busy: false,
+    model: session.model || null,
+    settings: normalizeServerSettings(session.settings),
+    messagesEl: null
+  };
+  const messagesEl = document.createElement('div');
+  messagesEl.className = 'chat__messages';
+  messagesEl.hidden = true;
+  messagesRoot.appendChild(messagesEl);
+  chat.messagesEl = messagesEl;
+  renderRestoredHistory(chat, session);
+  return chat;
+}
+
+async function branchActiveChat() {
+  const chat = getActiveChat();
+  if (!chat || !chat.sid || chat.busy) return;
+  if (branchBtn) branchBtn.disabled = true;
+  try {
+    const created = await apiBranchSession(chat.sid, chat.title);
+    const session = await apiGetSession(created.id);
+    const newChat = makeChatFromSession(session);
+    chats.push(newChat);
+    renderTabs();
+    activateChat(newChat);
+  } catch (err) {
+    addMessage(chat, 'assistant', `Ошибка ветвления: ${err.message}`);
+  } finally {
+    updateChatLayout();
+  }
+}
+
+function branchIcon() {
+  const span = document.createElement('span');
+  span.className = 'tabs__branch-icon';
+  span.innerHTML = BRANCH_ICON_SVG;
+  return span;
 }
 
 // ── Рендер сообщений ───────────────────────────────────────────────────────
@@ -806,6 +1064,13 @@ function removeWaiter(containerEl) {
   if (w) w.remove();
 }
 
+function scrollChatToBottom(chat) {
+  // Прокручивает окно чата вниз (к вейтеру/размышлению/новому ответу).
+  if (chat && chat.messagesEl) {
+    chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+  }
+}
+
 function createReasoning(el) {
   let node = el.querySelector('.message__reasoning');
   if (node) return node;
@@ -899,6 +1164,7 @@ async function streamAssistant(chat, qaEl) {
   qaEl.appendChild(assistantEl);
   const assistantContent = assistantEl.querySelector('.message__content');
   showWaiter(assistantContent);
+  scrollChatToBottom(chat);
   const jsonMode = !modeToggle.checked;
   const responseDate = new Date().toISOString();
   let full = '';
@@ -932,11 +1198,13 @@ async function streamAssistant(chat, qaEl) {
       if (chunk.type === 'reasoning_start') {
         createReasoning(assistantEl);
         showWaiter(assistantContent);
+        scrollChatToBottom(chat);
       } else if (chunk.type === 'reasoning_end') {
         thinkingText = chunk.content || '';
         if (thinkingText) setReasoningText(assistantEl, thinkingText);
         finishReasoning(assistantEl);
         showWaiter(assistantContent);
+        scrollChatToBottom(chat);
       } else if (chunk.type === 'done') {
         finalMeta = chunk.meta || null;
         full = chunk.content || '';
@@ -948,6 +1216,9 @@ async function streamAssistant(chat, qaEl) {
         }
       } else if (chunk.type === 'request_log') {
         handleRequestLog(chat, chunk.record);
+      } else if (chunk.type === 'facts') {
+        chat.facts = Array.isArray(chunk.items) ? chunk.items : [];
+        if (chat.id === activeChatId) renderFactsPanel(chat);
       } else if (chunk.type === 'error') {
         const err = new Error(chunk.error || 'Неизвестная ошибка сервера');
         err.code = chunk.code || null;
@@ -985,6 +1256,7 @@ async function streamAssistant(chat, qaEl) {
     updateSendButton();
     updateSettingsLock();
     renderChatInfo();
+    updateChatLayout();
   }
 }
 
@@ -1294,6 +1566,16 @@ function ensureChart() {
           barPercentage: 1,
           categoryPercentage: 1,
           stack: 'tokens'
+        },
+        {
+          label: 'Факты',
+          data: [],
+          backgroundColor: '#a06be8',
+          borderColor: '#a06be8',
+          borderWidth: 0,
+          barPercentage: 1,
+          categoryPercentage: 1,
+          stack: 'tokens'
         }
       ]
     },
@@ -1321,11 +1603,18 @@ function ensureChart() {
                   seg.reasoning > 0 ? ` (рассуждение: ${formatTokens(seg.reasoning)})` : '';
                 return `выход: ${formatTokens(seg.output)} ток.${reasoning}`;
               }
+              if (item.datasetIndex === 2) {
+                const reasoning =
+                  seg.summaryReasoning > 0
+                    ? ` (рассуждение: ${formatTokens(seg.summaryReasoning)})`
+                    : '';
+                return `саммаризация: ${formatTokens(seg.summary)} ток.${reasoning}`;
+              }
               const reasoning =
-                seg.summaryReasoning > 0
-                  ? ` (рассуждение: ${formatTokens(seg.summaryReasoning)})`
+                seg.factsReasoning > 0
+                  ? ` (рассуждение: ${formatTokens(seg.factsReasoning)})`
                   : '';
-              return `саммаризация: ${formatTokens(seg.summary)} ток.${reasoning}`;
+              return `факты: ${formatTokens(seg.facts)} ток.${reasoning}`;
             },
             footer: (items) => {
               if (!items[0].chart.$colorMode) return '';
@@ -1357,20 +1646,23 @@ function ensureChart() {
 function buildTurns(records) {
   // Группирует записи о запросах в «ходы» — по одному на сообщение
   // пользователя. Саммаризационные запросы прикрепляются к следующему
-  // основному; осиротевшая саммаризация (основной запрос упал) образует
-  // ход без основного.
+  // основному; факты (идут после ответа) — к текущему; осиротевшая
+  // саммаризация (основной запрос упал) образует ход без основного.
   const turns = [];
   let pending = [];
   for (const record of records) {
     if (record.kind === 'summary') {
       pending.push(record);
+    } else if (record.kind === 'facts') {
+      if (turns.length > 0) turns[turns.length - 1].facts.push(record);
+      else turns.push({ main: null, summaries: [], facts: [record] });
     } else {
-      turns.push({ main: record, summaries: pending });
+      turns.push({ main: record, summaries: pending, facts: [] });
       pending = [];
     }
   }
   if (pending.length > 0) {
-    turns.push({ main: null, summaries: pending });
+    turns.push({ main: null, summaries: pending, facts: [] });
   }
   return turns;
 }
@@ -1387,13 +1679,21 @@ function turnSegments(turn) {
     summary += (r.prompt_tokens || 0) + (r.completion_tokens || 0);
     summaryReasoning += r.reasoning_tokens || 0;
   }
+  let facts = 0;
+  let factsReasoning = 0;
+  for (const r of turn.facts || []) {
+    facts += (r.prompt_tokens || 0) + (r.completion_tokens || 0);
+    factsReasoning += r.reasoning_tokens || 0;
+  }
   return {
     input,
     output,
     reasoning,
     summary,
     summaryReasoning,
-    total: input + output + summary
+    facts,
+    factsReasoning,
+    total: input + output + summary + facts
   };
 }
 
@@ -1421,12 +1721,14 @@ function renderChart() {
     chart.data.datasets[0].data = segments.map((s) => (s.input > 0 ? s.input : null));
     chart.data.datasets[1].data = segments.map((s) => (s.output > 0 ? s.output : null));
     chart.data.datasets[2].data = segments.map((s) => (s.summary > 0 ? s.summary : null));
+    chart.data.datasets[3].data = segments.map((s) => (s.facts > 0 ? s.facts : null));
   } else {
     // Моно-режим: один столбик — только суммарные токены сообщения.
     chart.data.datasets[0].label = 'Всего';
     chart.data.datasets[0].data = segments.map((s) => (s.total > 0 ? s.total : null));
     chart.data.datasets[1].data = segments.map(() => null);
     chart.data.datasets[2].data = segments.map(() => null);
+    chart.data.datasets[3].data = segments.map(() => null);
   }
   if (chartLegend) chartLegend.hidden = !chartColorMode;
   const maxTotal = segments.reduce((m, s) => Math.max(m, s.total), 0);
@@ -1435,6 +1737,13 @@ function renderChart() {
   chart.$turns = segments;
   chart.$colorMode = chartColorMode;
   chart.update();
+}
+
+function applyChartCollapsed() {
+  if (chartbarEl) chartbarEl.classList.toggle('chartbar--collapsed', chartCollapsed);
+  if (chartCollapseBtn) {
+    chartCollapseBtn.setAttribute('aria-expanded', chartCollapsed ? 'false' : 'true');
+  }
 }
 
 // ── Обработчики событий ────────────────────────────────────────────────────
@@ -1575,15 +1884,31 @@ if (modeToggle) {
   modeToggle.addEventListener('change', syncActiveChatSettings);
 }
 
-if (summaryToggle) {
-  summaryToggle.addEventListener('change', () => {
-    updateSummaryFieldState(isEstablished(getActiveChat()));
+for (const radio of strategyRadios) {
+  radio.addEventListener('change', () => {
+    if (!radio.checked) return;
+    updateStrategyParamUI();
     syncActiveChatSettings();
+    updateChatLayout();
   });
 }
 
-if (keepRecentInput) {
-  keepRecentInput.addEventListener('input', syncActiveChatSettings);
+if (strategyParamInput) {
+  strategyParamInput.addEventListener('input', () => {
+    const strategy = currentStrategy();
+    const fallback = strategyParams[strategy] || 5;
+    strategyParams[strategy] = clampStrategyParam(
+      parseInt(strategyParamInput.value, 10),
+      fallback
+    );
+    syncActiveChatSettings();
+    updateStrategyHint();
+  });
+}
+
+if (branchBtn) {
+  branchBtn.innerHTML = BRANCH_ICON_SVG;
+  branchBtn.addEventListener('click', branchActiveChat);
 }
 
 if (chartColorToggle) {
@@ -1597,6 +1922,22 @@ if (chartColorToggle) {
     }
     if (chartLegend) chartLegend.hidden = !chartColorMode;
     renderChart();
+  });
+}
+
+if (chartCollapseBtn) {
+  chartCollapseBtn.addEventListener('click', () => {
+    chartCollapsed = !chartCollapsed;
+    try {
+      localStorage.setItem(CHART_COLLAPSED_KEY, chartCollapsed ? '1' : '0');
+    } catch {
+      /* localStorage может быть недоступен */
+    }
+    applyChartCollapsed();
+    if (!chartCollapsed) {
+      if (contextChart) contextChart.resize();
+      renderChart();
+    }
   });
 }
 
@@ -1650,6 +1991,7 @@ document.addEventListener('keydown', (e) => {
 // ── Инициализация ──────────────────────────────────────────────────────────
 autoResize();
 renderTotal();
+applyChartCollapsed();
 renderChart();
 loadModels();
 
@@ -1702,6 +2044,7 @@ function renderRestoredHistory(chat, session) {
 
 function sessionTitle(session) {
   if (session.kind === 'summary') return SUMMARY_CHAT_TITLE;
+  if (session.title) return session.title;
   const firstMsg = (session.history || []).find((m) => m.role === 'user' || m.role === 'system');
   return firstMsg ? firstMsg.content.replace(/\s+/g, ' ').trim() : 'Новый чат';
 }
@@ -1727,28 +2070,8 @@ function sessionTitle(session) {
   let mostRecent = null;
   let mostRecentTs = -Infinity;
   for (const session of restoredSessions) {
-    const chat = {
-      id: `chat-${++chatCounter}`,
-      sid: session.id,
-      title: sessionTitle(session),
-      history: [],
-      requests: Array.isArray(session.requests)
-        ? session.requests.map((r) => ({ ...r }))
-        : [],
-      renamed: Boolean(session.history && session.history.length > 0),
-      kind: session.kind === 'summary' ? 'summary' : 'chat',
-      busy: false,
-      model: session.model || null,
-      settings: normalizeServerSettings(session.settings),
-      messagesEl: null
-    };
-    const messagesEl = document.createElement('div');
-    messagesEl.className = 'chat__messages';
-    messagesEl.hidden = true;
-    messagesRoot.appendChild(messagesEl);
-    chat.messagesEl = messagesEl;
+    const chat = makeChatFromSession(session);
     chats.push(chat);
-    renderRestoredHistory(chat, session);
     const ts = typeof session.last_active === 'number' ? session.last_active : 0;
     if (ts > mostRecentTs) {
       mostRecentTs = ts;

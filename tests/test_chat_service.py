@@ -4,13 +4,15 @@ import pytest
 
 from server.pricing import message_cost
 from server.services.chat_service import (
+    FACTS_MESSAGE_PREFIX,
+    FACTS_SYSTEM_PROMPT,
     SUMMARY_MESSAGE_PREFIX,
     SUMMARIZER_SYSTEM_PROMPT,
     ChatService,
     MessageMeta,
     SessionKind,
 )
-from server.services.generation import ContextSummarySettings, GenerationSettings
+from server.services.generation import ContextStrategySettings, GenerationSettings
 
 
 class FakeRunner:
@@ -257,11 +259,15 @@ def fill_chat(svc, exchanges, pending_user=None):
         svc.add_user_message(pending_user)
 
 
-def cs_settings(requests_per_summary):
+def cs_settings(n):
     return GenerationSettings(
-        context_summary=ContextSummarySettings(
-            enabled=True, requests_per_summary=requests_per_summary
-        )
+        context_strategy=ContextStrategySettings(strategy="summarize", n=n)
+    )
+
+
+def strategy_settings(strategy, n=5, k=10):
+    return GenerationSettings(
+        context_strategy=ContextStrategySettings(strategy=strategy, n=n, k=k)
     )
 
 
@@ -432,3 +438,192 @@ def test_stream_completion_with_summary_records_main_and_marks_meta():
         "content": f"{SUMMARY_MESSAGE_PREFIX}\nСаммари 1:\nКРАТКО",
     }
     assert sent[-1]["content"] == "q"
+
+
+# ── Стратегии скользящего окна и фактов ─────────────────────────────────────
+
+
+def test_strategy_ignored_for_non_chat_kinds():
+    settings = strategy_settings("sliding", n=1)
+    svc = ChatService("c1", kind=SessionKind.SUMMARY, model="m", settings=settings)
+    fill_chat(svc, 3, pending_user="u4")
+    msgs = svc.build_request_messages()
+    # стратегия не применяется: уходит вся история
+    assert [m["content"] for m in msgs] == [
+        "инструкция", "a0", "u1", "a1", "u2", "a2", "u3", "a3", "u4",
+    ]
+
+
+def test_sliding_window_truncates_old_turns():
+    settings = strategy_settings("sliding", n=3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 4, pending_user="u5")
+    msgs = svc.build_request_messages()
+    # сид — равноправный обмен №1 и выпал из окна; только последние 3 обмена + новое
+    assert [m["content"] for m in msgs] == [
+        "u2", "a2", "u3", "a3", "u4", "a4", "u5",
+    ]
+    assert all(m["role"] != "system" for m in msgs)
+
+
+def test_sliding_seed_drops_out_of_window():
+    # Регрессия: N=2, сид «меня зовут Иван» + 2 вопроса + «Как меня зовут?»
+    settings = strategy_settings("sliding", n=2)
+    svc = ChatService("c1", model="m", settings=settings)
+    svc.seed_system_message("меня зовут Иван")
+    svc.append_assistant_message("a0", MessageMeta(model="m", elapsed_s=0.1))
+    svc.add_user_message("q1")
+    svc.append_assistant_message("a1", MessageMeta(model="m", elapsed_s=0.1))
+    svc.add_user_message("q2")
+    svc.append_assistant_message("a2", MessageMeta(model="m", elapsed_s=0.1))
+    svc.add_user_message("Как меня зовут?")
+    msgs = svc.build_request_messages()
+    # ни сида, ни ответа на него — модель имени не знает
+    assert [m["content"] for m in msgs] == ["q1", "a1", "q2", "a2", "Как меня зовут?"]
+    assert all(m["role"] != "system" for m in msgs)
+
+
+def test_sliding_window_no_truncation_when_few_turns():
+    settings = strategy_settings("sliding", n=3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 2, pending_user="u3")
+    msgs = svc.build_request_messages()
+    # обменов ≤ N — вся история (сид на месте, роль system)
+    assert [m["content"] for m in msgs] == [
+        "инструкция", "a0", "u1", "a1", "u2", "a2", "u3",
+    ]
+    assert msgs[0]["role"] == "system"
+
+
+def test_facts_context_includes_facts_and_window():
+    settings = strategy_settings("facts", k=2)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 3, pending_user="u4")
+    svc.facts = [["Имя", "Аня"], ["Хобби", "Python"]]
+    msgs = svc.build_request_messages()
+    # сид выпал (обменов 4 > K=2) → рамка фактов первая
+    assert msgs[0]["role"] == "user"
+    assert FACTS_MESSAGE_PREFIX in msgs[0]["content"]
+    assert "1. Имя: Аня" in msgs[0]["content"]
+    assert "2. Хобби: Python" in msgs[0]["content"]
+    # окно K=2: последние 2 обмена (u2,a2,u3,a3) + новое u4
+    assert [m["content"] for m in msgs[1:]] == ["u2", "a2", "u3", "a3", "u4"]
+    assert all(m["role"] != "system" for m in msgs)
+
+
+def test_facts_context_without_facts_has_no_frame():
+    settings = strategy_settings("facts", k=2)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 1, pending_user="u2")
+    msgs = svc.build_request_messages()
+    assert all(FACTS_MESSAGE_PREFIX not in m["content"] for m in msgs)
+
+
+def test_facts_block_renders_pairs_and_legacy():
+    block = ChatService._facts_block([["Имя", "Иван"], "легаси строка"])
+    assert FACTS_MESSAGE_PREFIX in block
+    assert "1. Имя: Иван" in block
+    assert "2. легаси строка" in block
+
+
+def test_branching_uses_full_history_without_limit():
+    # Регрессия: branching не использует n и не ограничивает историю
+    settings = strategy_settings("branching", n=2)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 5, pending_user="u6")
+    msgs = svc.build_request_messages()
+    assert [m["content"] for m in msgs] == [
+        "инструкция", "a0", "u1", "a1", "u2", "a2",
+        "u3", "a3", "u4", "a4", "u5", "a5", "u6",
+    ]
+    assert msgs == svc.to_openai_messages()
+
+
+def test_extract_facts_success_and_record():
+    settings = strategy_settings("facts", k=3)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 1, pending_user="u2")
+    runner = ScriptedRunner([summary_events('{"Имя": "Иван", "Город": "Москва"}')])
+    result = run_coro(svc.extract_facts(runner, spec_obj(), settings, "u2"))
+    assert result == [["Имя", "Иван"], ["Город", "Москва"]]
+    assert svc.facts == [["Имя", "Иван"], ["Город", "Москва"]]
+    assert svc.requests[-1].kind == "facts"
+    # запрос к экстрактору: системный промпт + список фактов и сообщение
+    sent = runner.calls[0]["messages"]
+    assert sent[0] == {"role": "system", "content": FACTS_SYSTEM_PROMPT}
+    assert "u2" in sent[1]["content"]
+
+
+def test_extract_facts_parses_code_fences():
+    settings = strategy_settings("facts")
+    svc = ChatService("c1", model="m", settings=settings)
+    svc.add_user_message("q")
+    runner = ScriptedRunner([summary_events('```json\n{"Имя": "Иван"}\n```')])
+    assert run_coro(svc.extract_facts(runner, spec_obj(), settings, "q")) == [
+        ["Имя", "Иван"]
+    ]
+
+
+def test_parse_facts_object_array_variants_and_dedup():
+    # JSON-объект
+    assert ChatService._parse_facts('{"Имя": "Иван", "Город": "Москва"}') == [
+        ["Имя", "Иван"], ["Город", "Москва"]
+    ]
+    # массив объектов {"key","value"}
+    assert ChatService._parse_facts('[{"key": "Имя", "value": "Иван"}]') == [
+        ["Имя", "Иван"]
+    ]
+    # массив пар
+    assert ChatService._parse_facts('[["Имя", "Иван"], ["Город", "Москва"]]') == [
+        ["Имя", "Иван"], ["Город", "Москва"]
+    ]
+    # мусор/легаси-массив строк — деградация
+    assert ChatService._parse_facts('["Пользователя зовут Иван"]') is None
+    assert ChatService._parse_facts("не json вовсе") is None
+    # дедупликация по ключу: позиция первого, значение последнего
+    assert ChatService._parse_facts('[["Имя", "Иван"], ["Имя", "Пётр"]]') == [
+        ["Имя", "Пётр"]
+    ]
+
+
+def test_extract_facts_overwrites_legacy_string_list():
+    settings = strategy_settings("facts")
+    svc = ChatService("c1", model="m", settings=settings)
+    svc.facts = ["Пользователя зовут Иван"]  # легаси-строка
+    svc.add_user_message("q")
+    runner = ScriptedRunner([summary_events('{"Имя": "Иван"}')])
+    # старый список отдаётся экстрактору текстом, ответ перезаписывает список
+    result = run_coro(svc.extract_facts(runner, spec_obj(), settings, "q"))
+    assert result == [["Имя", "Иван"]]
+    assert "Пользователя зовут Иван" in runner.calls[0]["messages"][1]["content"]
+
+
+def test_extract_facts_invalid_json_keeps_old():
+    settings = strategy_settings("facts")
+    svc = ChatService("c1", model="m", settings=settings)
+    svc.facts = ["старый"]
+    svc.add_user_message("q")
+    runner = ScriptedRunner([summary_events("не json вовсе")])
+    assert run_coro(svc.extract_facts(runner, spec_obj(), settings, "q")) is None
+    assert svc.facts == ["старый"]
+    # запрос всё равно учтён (токены сожжены)
+    assert svc.requests[-1].kind == "facts"
+
+
+def test_extract_facts_degrades_on_error():
+    from server.providers.base import ProviderError
+
+    settings = strategy_settings("facts")
+    svc = ChatService("c1", model="m", settings=settings)
+    svc.facts = ["старый"]
+    runner = ScriptedRunner([ProviderError(500, "boom")])
+    assert run_coro(svc.extract_facts(runner, spec_obj(), settings, "q")) is None
+    assert svc.facts == ["старый"]
+    assert svc.requests == []
+
+
+def test_extract_facts_noop_for_other_strategy():
+    svc = ChatService("c1", model="m", settings=GenerationSettings())
+    runner = ScriptedRunner([])
+    assert run_coro(svc.extract_facts(runner, spec_obj(), GenerationSettings(), "q")) is None
+    assert runner.calls == []

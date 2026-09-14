@@ -148,6 +148,34 @@ def test_delete_cascades_requests_and_summary(tmp_path):
     store.close()
 
 
+def test_facts_parent_and_history_roundtrip(tmp_path):
+    from server.services.chat_service import MessageMeta
+
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    chat = make_chat(model="m")
+    chat.parent_id = "parent1"
+    chat.title = "Ветка"
+    chat.facts = [["Имя", "Иван"], ["Город", "Москва"], "легаси строка"]
+    store.save_session(chat)
+    store.save_facts(chat.id, chat.facts)
+    chat.add_user_message("q")
+    chat.append_assistant_message("a", MessageMeta(model="m", elapsed_s=0.1))
+    store.save_history(chat.id, chat.history)
+
+    loaded = store.load_all()[0]
+    assert loaded.parent_id == "parent1"
+    assert loaded.title == "Ветка"
+    # пары сохраняются как пары, легаси-строки — как строки
+    assert loaded.facts == [["Имя", "Иван"], ["Город", "Москва"], "легаси строка"]
+    assert [m.content for m in loaded.history] == ["q", "a"]
+
+    # save_history перезаписывает историю целиком
+    store.save_history(chat.id, chat.history[:1])
+    assert [m.content for m in store.load_all()[0].history] == ["q"]
+    store.close()
+
+
 def test_migrates_missing_reasoning_column(tmp_path):
     """Ранее созданная БД без llm_requests.reasoning_tokens досоздаётся."""
     import sqlite3

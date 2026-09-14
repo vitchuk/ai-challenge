@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -32,6 +33,24 @@ SUMMARY_MESSAGE_PREFIX = "[Саммари начала диалога]"
 #: Сколько накопленных саммари сворачивать в одно метасаммари.
 COLLAPSE_SUMMARIES_AT = 3
 
+#: Системный промпт скрытого запроса извлечения фактов (стратегия facts).
+FACTS_SYSTEM_PROMPT = (
+    "Ты — экстрактор фактов. На входе: текущий список фактов (пары "
+    "«ключ — значение») и новое сообщение пользователя. Верни обновлённый "
+    "полный список строго как JSON-объект {\"ключ\": \"значение\"}. Ключ — "
+    "короткая категория одним словом (Имя, Город, Возраст, Работа, Цель, "
+    "Инструмент…). Значение — максимально короткое (1–3 слова), без связок и "
+    "без слова «Пользователь»: не «Пользователя зовут Иван», а {\"Имя\": "
+    "\"Иван\"}. Добавь новые, удали дубликаты по ключу, обнови/удали факты, "
+    "которым сообщение противоречит. Ничего не выдумывай. Только JSON."
+)
+
+#: Рамка служебного сообщения с фактами в основном запросе.
+FACTS_MESSAGE_PREFIX = "[Установленные факты]"
+
+#: Указание опираться на факты (добавляется к рамке фактов).
+FACTS_INSTRUCTION = "Опирайся на эти факты при ответе и не выдумывай нового."
+
 
 class SessionKind(str, Enum):
     """Тип сессии (чата)."""
@@ -43,7 +62,7 @@ class SessionKind(str, Enum):
 
 @dataclass
 class RequestRecord:
-    """Один запрос к LLM (основной ответ или скрытая саммаризация).
+    """Один запрос к LLM (основной ответ, скрытая саммаризация или факты).
 
     Используется для графика расхода токенов по сообщениям
     (``prompt_tokens``/``completion_tokens``/``reasoning_tokens``) и
@@ -51,7 +70,7 @@ class RequestRecord:
     """
 
     index: int
-    kind: str  # "main" | "summary"
+    kind: str  # "main" | "summary" | "facts"
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
@@ -208,9 +227,14 @@ class ChatService:
         self.history: list[MessageRecord] = []
         self.requests: list[RequestRecord] = []
         # Состояние чанковой саммаризации: накопленные саммари и число
-        # уже сжатых чанков (по `requests_per_summary` обменов каждый).
+        # уже сжатых чанков (по `context_strategy.n` запросов каждый).
         self.summary_items: list[str] = []
         self.summarized_chunks: int = 0
+        # Канонические факты (стратегия facts).
+        self.facts: list[str] = []
+        # Метаданные ответвлённого чата (снапшот): родитель и своё название.
+        self.parent_id: Optional[str] = None
+        self.title: Optional[str] = None
         self.busy = False
         self.created_at = time.time()
         self.last_active = time.time()
@@ -321,31 +345,40 @@ class ChatService:
         self.requests.append(record)
         return record
 
-    async def _run_summarizer(
-        self, runner, spec, settings, messages: list[dict]
+    async def _run_hidden(
+        self,
+        kind: str,
+        system_prompt: str,
+        runner,
+        spec,
+        settings,
+        messages: list[dict],
     ) -> Optional[str]:
-        """Выполняет один скрытый запрос саммаризации.
+        """Выполняет один скрытый служебный запрос к модели.
+
+        Служебные запросы (саммаризация, извлечение фактов) идут с
+        параметрами чата, но без JSON-режима: ``response_format`` управляет
+        форматом ответа пользователю. При ошибке апстрима деградирует
+        (возвращает ``None``), не обрывая чат; при успехе пишет запись
+        ``kind`` в журнал запросов.
 
         Args:
+            kind: тип записи в журнале (``summary``/``facts``).
+            system_prompt: системный промпт служебного запроса.
             runner: исполнитель :class:`StreamedCompletion`.
             spec: описание вызова апстрима (та же модель, что и чат).
             settings: настройки генерации чата.
-            messages: сообщения для суммаризатора (без системного промпта).
+            messages: сообщения служебного запроса (без системного промпта).
 
         Returns:
-            Текст саммари или ``None`` при ошибке/пустом ответе (деградация).
+            Текст ответа или ``None`` при ошибке/пустом ответе.
         """
-        # Служебный запрос идёт с параметрами чата, но без JSON-режима:
-        # response_format управляет форматом ответа пользователю, а не саммари.
-        summary_settings = replace(settings, response_format=None)
-        request_messages = [
-            {"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT},
-            *messages,
-        ]
+        hidden_settings = replace(settings, response_format=None)
+        request_messages = [{"role": "system", "content": system_prompt}, *messages]
         parts: list[str] = []
         usage = None
         try:
-            async for event in runner.run(spec, request_messages, summary_settings):
+            async for event in runner.run(spec, request_messages, hidden_settings):
                 if event.kind == "delta":
                     parts.append(event.content)
                 elif event.kind == "usage":
@@ -353,21 +386,35 @@ class ChatService:
                 elif event.kind == "done" and event.usage is not None:
                     usage = event.usage
         except Exception as exc:  # noqa: BLE001 - деградация вместо обрыва чата
-            logger.warning("Саммаризация не удалась (деградация): %s", exc)
+            logger.warning("Служебный запрос (%s) не удался (деградация): %s", kind, exc)
             return None
 
         text = "".join(parts).strip()
         if not text:
-            logger.warning("Саммаризация вернула пустой текст (деградация)")
+            logger.warning("Служебный запрос (%s) вернул пустой текст (деградация)", kind)
             return None
 
-        self._record_request("summary", usage)
+        self._record_request(kind, usage)
         return text
 
+    async def _run_summarizer(self, runner, spec, settings, messages: list[dict]) -> Optional[str]:
+        """Скрытый запрос саммаризации (обёртка :meth:`_run_hidden`)."""
+        return await self._run_hidden(
+            "summary", SUMMARIZER_SYSTEM_PROMPT, runner, spec, settings, messages
+        )
+
+    def _strategy(self):
+        """Настройки стратегии управления контекстом (только для chat-чатов)."""
+        if self.kind != SessionKind.CHAT:
+            return None
+        return self.settings.context_strategy
+
     def _chunk_size(self) -> int:
-        """Размер чанка в запросах (из настроек саммаризации)."""
-        context_summary = self.settings.context_summary
-        return context_summary.requests_per_summary if context_summary else 0
+        """Размер чанка в запросах (из настроек стратегии summarize)."""
+        strategy = self._strategy()
+        if strategy is None or strategy.strategy != "summarize":
+            return 0
+        return strategy.n
 
     def _request_units(self) -> list[list[MessageRecord]]:
         """Делит переписку без сида на «запросы» — единицы чанкования.
@@ -415,6 +462,66 @@ class ChatService:
             f"Саммари {i + 1}:\n{text}" for i, text in enumerate(items)
         )
 
+    @staticmethod
+    def _facts_block(items: list) -> str:
+        """Пронумерованный блок фактов (пары «ключ: значение») с указанием."""
+        lines = "\n".join(
+            f"{i + 1}. {ChatService._fact_line(item)}"
+            for i, item in enumerate(items)
+        )
+        return f"{FACTS_MESSAGE_PREFIX}\n{lines}\n\n{FACTS_INSTRUCTION}"
+
+    @staticmethod
+    def _fact_line(item) -> str:
+        """Строка факта: пара → «ключ: значение», легаси-строка → как есть."""
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            return f"{item[0]}: {item[1]}"
+        return str(item)
+
+    def _history_exchanges(self) -> list[list[MessageRecord]]:
+        """Обмены по всей истории, включая сид.
+
+        Обмен — реплика пользователя (или системный сид) и следующий за ней
+        ответ ассистента. Обмен №1 — сид и ответ на него. Висящее (ещё не
+        отвеченное) сообщение в обмены не входит.
+
+        Returns:
+            Список обменов, каждый — список сообщений (всегда 2).
+        """
+        exchanges: list[list[MessageRecord]] = []
+        i = 0
+        history = self.history
+        while (
+            i + 1 < len(history)
+            and history[i].role in ("user", "system")
+            and history[i + 1].role == "assistant"
+        ):
+            exchanges.append([history[i], history[i + 1]])
+            i += 2
+        return exchanges
+
+    def _window_messages(self, count: int) -> list[MessageRecord]:
+        """Последние ``count`` обменов истории (сид — равноправный участник).
+
+        Обмен №1 — системный сид и ответ на него. Если обменов не больше
+        ``count`` — возвращается вся история целиком; иначе — только последние
+        ``count`` обменов (выпавшие, включая сид, не уходят вовсе) плюс висящее
+        сообщение. Роли записей сохраняются как в истории.
+
+        Args:
+            count: размер окна в обменах.
+
+        Returns:
+            Список записей истории для контекста основного запроса.
+        """
+        exchanges = self._history_exchanges()
+        covered = len(exchanges) * 2
+        pending = self.history[covered:]
+        if len(exchanges) <= count:
+            return list(self.history)
+        window = [m for exchange in exchanges[-count:] for m in exchange]
+        return window + pending
+
     async def ensure_summaries(self, runner, spec, settings) -> list[str]:
         """Досчитывает чанковые саммари и сворачивает их при накоплении.
 
@@ -434,10 +541,10 @@ class ChatService:
         Returns:
             Текущий список саммари (пустой, если саммаризация выключена).
         """
-        context_summary = settings.context_summary
-        if context_summary is None or not context_summary.enabled:
+        strategy = self._strategy()
+        if strategy is None or strategy.strategy != "summarize":
             return []
-        size = context_summary.requests_per_summary
+        size = strategy.n
 
         # Единица чанкования — «запрос» (сид-ответ либо обмен «вопрос+ответ»).
         units = self._request_units()
@@ -465,6 +572,186 @@ class ChatService:
 
         return list(self.summary_items)
 
+    async def extract_facts(
+        self, runner, spec, settings, user_message: str
+    ) -> Optional[list]:
+        """Обновляет канонические факты скрытым запросом (стратегия facts).
+
+        На входе — текущий список фактов (пары «ключ — значение») и новое
+        сообщение пользователя; модель возвращает полный обновлённый
+        JSON-объект. Парсинг терпим к Markdown-оградам; при сбое парсинга
+        старый список сохраняется (деградация). Запрос идёт с параметрами
+        чата, кроме ``response_format``.
+
+        Args:
+            runner: исполнитель :class:`StreamedCompletion`.
+            spec: описание вызова апстрима (та же модель, что и чат).
+            settings: настройки генерации чата.
+            user_message: новое сообщение пользователя.
+
+        Returns:
+            Обновлённый список фактов или ``None`` (не facts / ошибка / сбой).
+        """
+        strategy = self._strategy()
+        if strategy is None or strategy.strategy != "facts":
+            return None
+
+        facts_text = (
+            "\n".join(f"- {self._fact_line(fact)}" for fact in self.facts)
+            if self.facts
+            else "(список пуст)"
+        )
+        content = (
+            f"Установленные факты:\n{facts_text}\n\n"
+            f"Новое сообщение пользователя:\n{user_message}"
+        )
+        text = await self._run_hidden(
+            "facts",
+            FACTS_SYSTEM_PROMPT,
+            runner,
+            spec,
+            settings,
+            [{"role": "user", "content": content}],
+        )
+        if text is None:
+            return None
+        parsed = self._parse_facts(text)
+        if parsed is None:
+            logger.warning("Не удалось разобрать факты (деградация): %r", text[:200])
+            return None
+        self.facts = parsed
+        return list(self.facts)
+
+    @staticmethod
+    def _load_json(text: str):
+        """Пытается распарсить JSON: целиком, затем первую ``{…}``/``[…]``."""
+        candidates = [text, ChatService._extract_json(text)]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    @staticmethod
+    def _extract_json(text: str) -> str:
+        """Подстрока от первой ``{``/``[`` до последней ``}``/``]``."""
+        starts = [i for i in (text.find("{"), text.find("[")) if i != -1]
+        ends = [i for i in (text.rfind("}"), text.rfind("]")) if i != -1]
+        if not starts or not ends:
+            return ""
+        start, end = min(starts), max(ends)
+        return text[start : end + 1] if end > start else ""
+
+    @staticmethod
+    def _parse_facts(text: str) -> Optional[list[list[str]]]:
+        """Разбирает ответ модели в список пар «ключ — значение».
+
+        Принимает JSON-объект ``{"ключ": "значение"}``, массив объектов
+        ``{"key","value"}`` и массив пар ``[ключ, значение]``; терпимо к
+        Markdown-оградам. Дедупликация по ключу (позиция первого вхождения,
+        значение последнего). Пустой список — валидный результат. ``None`` —
+        формат не распознан (деградация; в т.ч. прежний массив строк).
+
+        Args:
+            text: ответ модели.
+
+        Returns:
+            Список пар ``[[ключ, значение], …]`` или ``None``.
+        """
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
+            if cleaned.rstrip().endswith("```"):
+                cleaned = cleaned.rstrip()[:-3]
+        data = ChatService._load_json(cleaned)
+        if data is None:
+            return None
+
+        if isinstance(data, dict):
+            raw_items = list(data.items())
+        elif isinstance(data, list):
+            raw_items = []
+            for item in data:
+                if isinstance(item, dict):
+                    raw_items.append((item.get("key"), item.get("value")))
+                elif isinstance(item, (list, tuple)) and len(item) == 2:
+                    raw_items.append((item[0], item[1]))
+                else:
+                    return None
+        else:
+            return None
+
+        pairs: list[list[str]] = []
+        positions: dict[str, int] = {}
+        for key, value in raw_items:
+            if key is None or value is None:
+                continue
+            key_str, value_str = str(key).strip(), str(value).strip()
+            if not key_str or not value_str:
+                continue
+            if key_str in positions:
+                pairs[positions[key_str]][1] = value_str
+            else:
+                positions[key_str] = len(pairs)
+                pairs.append([key_str, value_str])
+        return pairs
+
+    def _system_message(self) -> Optional[dict]:
+        """Системное сообщение чата (сид из истории или ``system_prompt``)."""
+        if self.history and self.history[0].role == "system":
+            return {"role": "system", "content": self.history[0].content}
+        if self.system_prompt:
+            return {"role": "system", "content": self.system_prompt}
+        return None
+
+    def _summarize_messages(self, summary_items: list[str]) -> list[dict]:
+        """Основной запрос для стратегии summarize (саммари + вербатим-хвост)."""
+        messages: list[dict] = []
+        system = self._system_message()
+        if system:
+            messages.append(system)
+        if summary_items:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"{SUMMARY_MESSAGE_PREFIX}\n"
+                        f"{self._summaries_block(summary_items)}"
+                    ),
+                }
+            )
+        units = self._request_units()
+        covered = sum(
+            len(unit) for unit in units[: self.summarized_chunks * self._chunk_size()]
+        )
+        messages.extend(
+            {"role": m.role, "content": m.content}
+            for m in self.non_seed_messages()[covered:]
+        )
+        return messages
+
+    def _windowed_messages(self, count: int, facts: bool = False) -> list[dict]:
+        """Основной запрос для стратегий sliding/facts (окно + новое).
+
+        Сид не добавляется принудительно: он подчиняется окну и уходит как
+        обычная запись истории (с ролью ``system``), а если выпал — не уходит
+        вовсе. Блок фактов стратегии ``facts`` присутствует всегда и ставится
+        после ведущего system-сообщения (если оно есть в окне), иначе первым.
+        """
+        messages = [
+            {"role": m.role, "content": m.content}
+            for m in self._window_messages(count)
+        ]
+        if facts and self.facts:
+            index = 1 if messages and messages[0]["role"] == "system" else 0
+            messages.insert(
+                index, {"role": "user", "content": self._facts_block(self.facts)}
+            )
+        return messages
+
     def build_request_messages(
         self,
         summary_items: Optional[list[str]] = None,
@@ -472,48 +759,30 @@ class ChatService:
     ) -> list[dict]:
         """Собирает массив сообщений для основного запроса.
 
-        Без саммаризации — обычная история (см. :meth:`to_openai_messages`).
-        С саммаризацией — ``[системный промпт] + [рамка со всеми саммари] +
-        [сообщения после курсора сжатых чанков без изменений]``.
+        Способ сборки зависит от стратегии контекста чата (только
+        ``kind=chat``): ``none``/``branching`` — вся история, ``summarize`` —
+        саммари чанков, ``sliding`` — окно последних реплик, ``facts`` —
+        служебный блок фактов + окно реплик.
 
         Args:
-            summary_items: текущие саммари (``None`` — саммаризация выключена).
+            summary_items: текущие саммари (для стратегии summarize).
             extra_system: дополнительный системный промпт (JSON-режим),
                 вставляется самым первым.
 
         Returns:
             Список ``{"role", "content"}`` для запроса к апстриму.
         """
-        if summary_items is None:
-            messages = self.to_openai_messages()
+        strategy = self._strategy()
+        name = strategy.strategy if strategy else "none"
+
+        if name == "summarize" and summary_items is not None:
+            messages = self._summarize_messages(summary_items)
+        elif name == "sliding" and strategy is not None:
+            messages = self._windowed_messages(strategy.n)
+        elif name == "facts" and strategy is not None:
+            messages = self._windowed_messages(strategy.k, facts=True)
         else:
-            messages = []
-            if self.history and self.history[0].role == "system":
-                messages.append(
-                    {"role": "system", "content": self.history[0].content}
-                )
-            elif self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
-            if summary_items:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"{SUMMARY_MESSAGE_PREFIX}\n"
-                            f"{self._summaries_block(summary_items)}"
-                        ),
-                    }
-                )
-            # Курсор: сколько сообщений покрыто сжатыми единицами (запросами).
-            units = self._request_units()
-            covered = sum(
-                len(unit)
-                for unit in units[: self.summarized_chunks * self._chunk_size()]
-            )
-            messages.extend(
-                {"role": m.role, "content": m.content}
-                for m in self.non_seed_messages()[covered:]
-            )
+            messages = self.to_openai_messages()
 
         if extra_system:
             messages.insert(0, {"role": "system", "content": extra_system})

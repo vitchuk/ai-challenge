@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Помогатор2К</title>
-  <link rel="stylesheet" href="style.css?v=11" />
+  <link rel="stylesheet" href="style.css?v=14" />
 </head>
 <body>
   <div class="app">
@@ -16,23 +16,40 @@
       </div>
     </aside>
 
-    <div class="chat">
-      <main id="messages" class="chat__body"></main>
+    <div class="chat" id="chat-column">
+      <div class="chat__main">
+        <main id="messages" class="chat__body"></main>
 
-      <form id="form" class="chat__form">
-        <div class="chat__input-wrap">
-          <div id="command-menu" class="command-menu" hidden></div>
-          <textarea
-            id="input"
-            class="chat__input"
-            rows="1"
-            placeholder="Напишите сообщение..."
-          ></textarea>
-        </div>
-        <button id="send" type="submit" class="chat__send">Отправить</button>
-      </form>
+        <form id="form" class="chat__form">
+          <div class="chat__input-wrap">
+            <div id="command-menu" class="command-menu" hidden></div>
+            <textarea
+              id="input"
+              class="chat__input"
+              rows="1"
+              placeholder="Напишите сообщение..."
+            ></textarea>
+          </div>
+          <button
+            id="branch-btn"
+            class="chat__branch"
+            type="button"
+            title="Продолжить в другом чате"
+            aria-label="Продолжить в другом чате"
+            hidden
+          ></button>
+          <button id="send" type="submit" class="chat__send">Отправить</button>
+        </form>
 
-      <div id="chat-info" class="chat-info"></div>
+        <div id="chat-info" class="chat-info"></div>
+      </div>
+
+      <div id="facts-splitter" class="chat__splitter" hidden></div>
+      <aside id="facts-panel" class="chat__facts" hidden>
+        <div class="chat__facts-head">Факты</div>
+        <ol id="facts-list" class="chat__facts-list"></ol>
+        <div id="facts-empty" class="chat__facts-empty">Фактов пока нет</div>
+      </aside>
     </div>
 
     <aside class="settings">
@@ -102,25 +119,47 @@
         </div>
 
         <div class="settings__field">
-          <span class="settings__label">Саммаризация контекста</span>
-          <div class="settings__switch-row">
-            <label class="settings__switch">
-              <input type="checkbox" id="setting-summary" />
-              <span class="settings__switch-slider"></span>
+          <span class="settings__label">Стратегия контекста</span>
+          <div class="settings__radios" role="radiogroup" aria-label="Стратегия контекста">
+            <label class="settings__radio">
+              <input type="radio" name="context-strategy" value="none" checked />
+              <span class="settings__radio-dot"></span>
+              <span>Нет</span>
             </label>
+            <label class="settings__radio">
+              <input type="radio" name="context-strategy" value="summarize" />
+              <span class="settings__radio-dot"></span>
+              <span>Саммаризация</span>
+            </label>
+            <label class="settings__radio">
+              <input type="radio" name="context-strategy" value="sliding" />
+              <span class="settings__radio-dot"></span>
+              <span>Sliding Window</span>
+            </label>
+            <label class="settings__radio">
+              <input type="radio" name="context-strategy" value="facts" />
+              <span class="settings__radio-dot"></span>
+              <span>Sticky Facts</span>
+            </label>
+            <label class="settings__radio">
+              <input type="radio" name="context-strategy" value="branching" />
+              <span class="settings__radio-dot"></span>
+              <span>Branching</span>
+            </label>
+          </div>
+          <div class="settings__switch-row" id="strategy-param-row" hidden>
             <input
               type="number"
-              id="setting-keep-recent"
+              id="strategy-param"
               class="settings__input settings__input--compact"
               min="1"
               max="20"
               step="1"
               value="5"
-              title="Сколько запросов сжимается в одну саммари"
             />
-            <span class="settings__inline-hint">запросов</span>
+            <span class="settings__inline-hint" id="strategy-param-label">запросов</span>
           </div>
-          <p class="settings__hint">сжимает историю каждые N запросов</p>
+          <p class="settings__hint" id="strategy-hint">вся история в контексте</p>
         </div>
 
         <div class="settings__field">
@@ -184,7 +223,10 @@
 
   <footer class="chartbar">
     <div class="chartbar__head">
-      <span class="chartbar__title">Токены по сообщениям</span>
+      <button id="chart-collapse" class="chartbar__collapse" type="button" aria-expanded="false">
+        <span class="chartbar__chevron"></span>
+        <span class="chartbar__title">Токены по сообщениям</span>
+      </button>
       <span class="chartbar__head-side">
         <span class="chartbar__legend">
           <span class="chartbar__legend-item">
@@ -195,6 +237,9 @@
           </span>
           <span class="chartbar__legend-item">
             <span class="chartbar__dot chartbar__dot--summary"></span>саммаризация
+          </span>
+          <span class="chartbar__legend-item">
+            <span class="chartbar__dot chartbar__dot--facts"></span>факты
           </span>
         </span>
         <label class="chartbar__mode">
@@ -213,6 +258,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=11"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
