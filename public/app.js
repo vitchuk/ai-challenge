@@ -29,6 +29,15 @@ const summarizeBtn = document.getElementById('summarize');
 const tabsListEl = document.getElementById('tabs-list');
 const chatInfoEl = document.getElementById('chat-info');
 const chatColumn = document.getElementById('chat-column');
+const chatMain = document.getElementById('chat-main');
+const viewTabChat = document.getElementById('view-tab-chat');
+const viewTabMemory = document.getElementById('view-tab-memory');
+const memoryView = document.getElementById('memory-view');
+const memoryTabList = document.getElementById('memory-tab-list');
+const memoryNewName = document.getElementById('memory-new-name');
+const memoryDbToggle = document.getElementById('memory-db-toggle');
+const memoryAdd = document.getElementById('memory-add');
+const memoryEditor = document.getElementById('memory-editor');
 const factsPanel = document.getElementById('facts-panel');
 const factsList = document.getElementById('facts-list');
 const factsEmpty = document.getElementById('facts-empty');
@@ -144,11 +153,21 @@ const BRANCH_ICON_SVG =
   '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/>' +
   '<circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
 
+// Иконка базы данных — для кнопки-переключателя и персистентных вкладок памяти.
+const DB_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>' +
+  '<path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>';
+
 const chats = [];
 let activeChatId = null;
 let chatCounter = 0;
 let tokensBurned = 0;
 let selectedModel = null;
+// Вид основной области: 'chat' | 'memory'; флаг «сохранять в БД» для новой вкладки.
+let activeView = 'chat';
+let memoryDbPersistent = false;
 
 // ── Базовые UI-утилиты ─────────────────────────────────────────────────────
 function renderTotal() {
@@ -674,6 +693,9 @@ async function createChat(kind = 'chat', title = 'Новый чат') {
     title,
     history: [],
     requests: [],
+    facts: [],
+    memoryStores: [],
+    memoryActiveId: null,
     renamed: false,
     kind,
     busy: false,
@@ -760,6 +782,7 @@ function activateChat(chat) {
   renderChatInfo();
   renderChart();
   updateChatLayout();
+  if (activeView === 'memory') renderMemoryView();
   // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
   if (chat.sid) {
     apiActivateSession(chat.sid).catch((err) => {
@@ -804,9 +827,18 @@ function chatStrategy() {
 function updateChatLayout() {
   const chat = getActiveChat();
   const strategy = chatStrategy();
-  // Панель фактов — как только выбрана стратегия facts (в т.ч. до первого
-  // сообщения); кнопка ветвления — только у начатого чата.
-  const showFacts = strategy === 'facts';
+  const isChat = Boolean(chat && chat.kind === 'chat');
+  // Вкладка «Память» есть только у обычных чатов; иначе принудительно «Чат».
+  if (viewTabMemory) viewTabMemory.hidden = !isChat;
+  if (!isChat && activeView === 'memory') {
+    activeView = 'chat';
+    if (viewTabChat) viewTabChat.classList.add('chat__view-tab--active');
+    if (viewTabMemory) viewTabMemory.classList.remove('chat__view-tab--active');
+    if (chatMain) chatMain.hidden = false;
+    if (memoryView) memoryView.hidden = true;
+  }
+  // Панель фактов — только в виде «Чат» и при стратегии facts.
+  const showFacts = strategy === 'facts' && activeView === 'chat';
   if (factsPanel) factsPanel.hidden = !showFacts;
   if (factsSplitter) factsSplitter.hidden = !showFacts;
   if (chatColumn) chatColumn.classList.toggle('chat--facts', showFacts);
@@ -817,6 +849,201 @@ function updateChatLayout() {
   if (branchBtn) {
     branchBtn.hidden = strategy !== 'branching' || !isEstablished(chat);
     branchBtn.disabled = Boolean(chat && chat.busy);
+  }
+}
+
+// ── Виды основной области: Чат / Память ────────────────────────────────────
+function switchView(view) {
+  activeView = view === 'memory' ? 'memory' : 'chat';
+  const isMemory = activeView === 'memory';
+  if (viewTabChat) viewTabChat.classList.toggle('chat__view-tab--active', !isMemory);
+  if (viewTabMemory) {
+    viewTabMemory.classList.toggle('chat__view-tab--active', isMemory);
+  }
+  if (chatMain) chatMain.hidden = isMemory;
+  if (memoryView) memoryView.hidden = !isMemory;
+  updateChatLayout();
+  if (isMemory) renderMemoryView();
+}
+
+function activeMemoryStore(chat) {
+  const stores = (chat && chat.memoryStores) || [];
+  return stores.find((s) => s.id === chat.memoryActiveId) || stores[0] || null;
+}
+
+function renderMemoryView() {
+  const chat = getActiveChat();
+  if (!memoryView || !memoryTabList || !memoryEditor) return;
+
+  memoryTabList.innerHTML = '';
+  const stores = (chat && chat.memoryStores) || [];
+  for (const store of stores) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = 'memory__tab' + (activeMemoryStore(chat) === store ? ' memory__tab--active' : '');
+    tab.title = store.persistent ? `${store.name} (в БД)` : store.name;
+    if (store.persistent) {
+      const icon = document.createElement('span');
+      icon.className = 'memory__tab-icon';
+      icon.innerHTML = DB_ICON_SVG;
+      tab.appendChild(icon);
+    }
+    const name = document.createElement('span');
+    name.className = 'memory__tab-name';
+    name.textContent = store.name;
+    const close = document.createElement('span');
+    close.className = 'memory__tab-close';
+    close.textContent = '×';
+    close.title = 'Удалить вкладку';
+    close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteMemoryStore(chat, store.id);
+    });
+    tab.append(name, close);
+    tab.addEventListener('click', () => {
+      chat.memoryActiveId = store.id;
+      renderMemoryView();
+    });
+    memoryTabList.appendChild(tab);
+  }
+
+  if (memoryDbToggle) {
+    memoryDbToggle.classList.toggle('memory__db--active', memoryDbPersistent);
+    memoryDbToggle.setAttribute('aria-pressed', memoryDbPersistent ? 'true' : 'false');
+  }
+
+  renderMemoryEditor(chat, activeMemoryStore(chat));
+}
+
+function renderMemoryEditor(chat, store) {
+  memoryEditor.innerHTML = '';
+  if (!store) {
+    const empty = document.createElement('div');
+    empty.className = 'memory__empty';
+    empty.textContent = 'Создайте вкладку: укажите название, при необходимости включите сохранение в БД и нажмите «+».';
+    memoryEditor.appendChild(empty);
+    return;
+  }
+
+  const form = document.createElement('div');
+  form.className = 'memory__form';
+  const keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.id = 'memory-key';
+  keyInput.className = 'memory__input';
+  keyInput.placeholder = 'Ключ';
+  const valueInput = document.createElement('input');
+  valueInput.type = 'text';
+  valueInput.id = 'memory-value';
+  valueInput.className = 'memory__input';
+  valueInput.placeholder = 'Значение';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'memory__save';
+  saveBtn.textContent = 'Сохранить';
+  const submit = () => saveMemoryItem(chat, store, keyInput, valueInput);
+  saveBtn.addEventListener('click', submit);
+  for (const el of [keyInput, valueInput]) {
+    el.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
+    });
+  }
+  form.append(keyInput, valueInput, saveBtn);
+  memoryEditor.appendChild(form);
+
+  const items = document.createElement('div');
+  items.className = 'memory__items';
+  store.items.forEach((item, index) => {
+    const row = document.createElement('div');
+    row.className = 'memory__item';
+    const text = document.createElement('span');
+    text.className = 'memory__item-text';
+    const key = document.createElement('span');
+    key.className = 'memory__item-key';
+    key.textContent = `${item[0]}:`;
+    text.append(key, document.createTextNode(` ${item[1]}`));
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'memory__item-del';
+    del.textContent = 'удалить';
+    del.addEventListener('click', () => deleteMemoryItem(chat, store, index));
+    row.append(text, del);
+    items.appendChild(row);
+  });
+  memoryEditor.appendChild(items);
+}
+
+function createMemoryStore() {
+  const chat = getActiveChat();
+  if (!chat || chat.kind !== 'chat') return;
+  chat.memoryStores = chat.memoryStores || [];
+  const name =
+    (memoryNewName ? memoryNewName.value.trim() : '') ||
+    `Вкладка ${chat.memoryStores.length + 1}`;
+  const store = {
+    id: `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name,
+    persistent: memoryDbPersistent,
+    items: []
+  };
+  chat.memoryStores.push(store);
+  chat.memoryActiveId = store.id;
+  if (memoryNewName) memoryNewName.value = '';
+  // Кнопка БД сбрасывается — следующая вкладка по умолчанию неперсистентна.
+  memoryDbPersistent = false;
+  syncMemory(chat);
+  renderMemoryView();
+  if (memoryNewName) memoryNewName.focus();
+}
+
+function deleteMemoryStore(chat, storeId) {
+  if (!chat || !Array.isArray(chat.memoryStores)) return;
+  chat.memoryStores = chat.memoryStores.filter((s) => s.id !== storeId);
+  if (chat.memoryActiveId === storeId) {
+    chat.memoryActiveId = chat.memoryStores.length ? chat.memoryStores[0].id : null;
+  }
+  syncMemory(chat);
+  renderMemoryView();
+}
+
+function saveMemoryItem(chat, store, keyInput, valueInput) {
+  const key = (keyInput.value || '').trim();
+  const value = (valueInput.value || '').trim();
+  if (!key || !value) return;
+  store.items.push([key, value]);
+  keyInput.value = '';
+  valueInput.value = '';
+  syncMemory(chat);
+  renderMemoryEditor(chat, store);
+  const next = memoryEditor.querySelector('#memory-key');
+  if (next) next.focus();
+}
+
+function deleteMemoryItem(chat, store, index) {
+  store.items.splice(index, 1);
+  syncMemory(chat);
+  renderMemoryView();
+}
+
+async function syncMemory(chat) {
+  if (!chat || !chat.sid) return;
+  try {
+    logClient('send', `PUT /api/sessions/${chat.sid}/memory`, { stores: chat.memoryStores });
+    const res = await fetch(`/api/sessions/${chat.sid}/memory`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stores: chat.memoryStores || [] })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Ошибка ${res.status}`);
+    }
+    logClient('receive', `PUT /api/sessions/${chat.sid}/memory → ${res.status}`);
+  } catch (err) {
+    logClient('receive', `PUT /api/sessions/${chat.sid}/memory — ошибка`, err.message);
   }
 }
 
@@ -921,6 +1148,17 @@ function makeChatFromSession(session) {
       ? session.requests.map((r) => ({ ...r }))
       : [],
     facts: Array.isArray(session.facts) ? [...session.facts] : [],
+    // Память чата: после перезагрузки восстанавливаются только
+    // персистентные вкладки (остальные жили до перезагрузки страницы).
+    memoryStores: (Array.isArray(session.memory) ? session.memory : [])
+      .filter((store) => store && store.persistent)
+      .map((store) => ({
+        id: store.id,
+        name: store.name,
+        persistent: true,
+        items: Array.isArray(store.items) ? store.items.map((item) => [...item]) : []
+      })),
+    memoryActiveId: null,
     renamed: Boolean(session.history && session.history.length > 0),
     kind: session.kind === 'summary' ? 'summary' : 'chat',
     busy: false,
@@ -1911,6 +2149,36 @@ if (branchBtn) {
   branchBtn.addEventListener('click', branchActiveChat);
 }
 
+if (viewTabChat) {
+  viewTabChat.addEventListener('click', () => switchView('chat'));
+}
+
+if (viewTabMemory) {
+  viewTabMemory.addEventListener('click', () => switchView('memory'));
+}
+
+if (memoryDbToggle) {
+  memoryDbToggle.innerHTML = DB_ICON_SVG;
+  memoryDbToggle.addEventListener('click', () => {
+    memoryDbPersistent = !memoryDbPersistent;
+    memoryDbToggle.classList.toggle('memory__db--active', memoryDbPersistent);
+    memoryDbToggle.setAttribute('aria-pressed', memoryDbPersistent ? 'true' : 'false');
+  });
+}
+
+if (memoryAdd) {
+  memoryAdd.addEventListener('click', createMemoryStore);
+}
+
+if (memoryNewName) {
+  memoryNewName.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      createMemoryStore();
+    }
+  });
+}
+
 if (chartColorToggle) {
   chartColorToggle.checked = chartColorMode;
   chartColorToggle.addEventListener('change', () => {
@@ -2072,6 +2340,12 @@ function sessionTitle(session) {
   for (const session of restoredSessions) {
     const chat = makeChatFromSession(session);
     chats.push(chat);
+    // После перезагрузки страницы неперсистентные вкладки памяти не
+    // восстанавливаются — пересинхронизируем состояние, чтобы устаревшие
+    // вкладки исчезли и с сервера (из контекста запросов к LLM).
+    if (Array.isArray(session.memory) && session.memory.some((s) => s && !s.persistent)) {
+      syncMemory(chat);
+    }
     const ts = typeof session.last_active === 'number' ? session.last_active : 0;
     if (ts > mostRecentTs) {
       mostRecentTs = ts;

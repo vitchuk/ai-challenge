@@ -56,10 +56,49 @@ body {
 
 .chat {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   flex: 0 0 60%;
   min-width: 0;
   border-right: 1px solid var(--border);
+}
+
+/* Полоса видов чата (Чат / Память). */
+.chat__views {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat__view-tab {
+  padding: 7px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.chat__view-tab:hover {
+  color: var(--text);
+}
+
+.chat__view-tab--active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Область под полосой видов: чат | память | (факты). */
+.chat__content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
 }
 
 /* Левая (основная) часть колонки чата. */
@@ -1229,6 +1268,303 @@ body {
   cursor: not-allowed;
 }
 
+/* ── Вкладка «Память» (именованные KV-хранилища) ─────────────────────────── */
+.chat__memory {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 16px;
+}
+
+.memory__tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.memory__tabs::-webkit-scrollbar {
+  height: 6px;
+}
+
+.memory__tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.memory__tabs::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 3px;
+}
+
+.memory__tabs::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 140, 255, 0.7);
+}
+
+.memory__tab-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.memory__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  max-width: 220px;
+  padding: 7px 10px 7px 12px;
+  border-radius: 10px 10px 0 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.memory__tab--active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.12);
+}
+
+.memory__tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory__tab-close {
+  flex: none;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.memory__tab-close:hover {
+  color: #ef5350;
+  opacity: 1;
+}
+
+/* Иконка БД у персистентной вкладки (слева от названия). */
+.memory__tab-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.memory__tab-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.memory__db svg {
+  width: 18px;
+  height: 18px;
+}
+
+.memory__create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: 4px;
+}
+
+.memory__name {
+  width: 170px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.memory__name:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.memory__name::placeholder {
+  color: var(--muted);
+}
+
+/* Объёмная кнопка-иконка «Сохранять в БД» (нажата = персистентно). */
+.memory__db {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #232833, #171b22);
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 2px 4px rgba(0, 0, 0, 0.45);
+  transition: color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.memory__db:hover {
+  color: var(--text);
+}
+
+.memory__db--active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: linear-gradient(180deg, rgba(79, 140, 255, 0.28), rgba(79, 140, 255, 0.12));
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.55),
+    0 0 14px rgba(79, 140, 255, 0.35);
+}
+
+.memory__add {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.memory__add:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(79, 140, 255, 0.25);
+}
+
+.memory__editor {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.memory__form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.memory__input {
+  flex: 1 1 160px;
+  min-width: 120px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.memory__input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 14px rgba(79, 140, 255, 0.2);
+}
+
+.memory__input::placeholder {
+  color: var(--muted);
+}
+
+.memory__save {
+  flex: none;
+  padding: 9px 16px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease, box-shadow 0.15s ease;
+}
+
+.memory__save:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 0 14px rgba(79, 140, 255, 0.35);
+}
+
+.memory__items {
+  display: flex;
+  flex-direction: column;
+}
+
+.memory__item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.memory__item-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+
+.memory__item-key {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.memory__item-del {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.memory__item-del:hover {
+  color: #ef5350;
+}
+
+.memory__empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 /* ── Панель фактов (стратегия facts) ─────────────────────────────────────── */
 .chat__splitter {
   flex: none;
@@ -1550,6 +1886,9 @@ body {
   .chat {
     flex: 1;
     border-right: none;
+  }
+
+  .chat__content {
     flex-direction: column;
   }
 

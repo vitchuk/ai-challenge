@@ -29,6 +29,12 @@ class BranchRequest(BaseModel):
     title: Optional[str] = None
 
 
+class MemorySyncRequest(BaseModel):
+    """Тело ``PUT /api/sessions/{id}/memory`` — полное состояние памяти чата."""
+
+    stores: list[dict[str, Any]] = []
+
+
 class MessageCreateRequest(BaseModel):
     """Тело ``POST /api/sessions/{id}/messages``."""
 

@@ -17,6 +17,7 @@ from typing import Optional
 
 from .chat_service import (
     ChatService,
+    MemoryStore,
     MessageRecord,
     RequestRecord,
     SessionKind,
@@ -68,6 +69,12 @@ CREATE TABLE IF NOT EXISTS session_summary_state (
 CREATE TABLE IF NOT EXISTS session_facts (
     session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     items       TEXT NOT NULL DEFAULT '[]',
+    updated_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_memory (
+    session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    stores      TEXT NOT NULL DEFAULT '[]',
     updated_at  REAL NOT NULL
 );
 
@@ -275,6 +282,26 @@ class SessionStore:
         )
         self._conn.commit()
 
+    def save_memory(self, session_id: str, stores: list[MemoryStore]) -> None:
+        """Сохраняет (upsert) память чата — только персистентные вкладки.
+
+        Args:
+            session_id: идентификатор сессии.
+            stores: вкладки памяти чата.
+        """
+        persistent = [store.to_dict() for store in stores if store.persistent]
+        self._conn.execute(
+            """
+            INSERT INTO session_memory (session_id, stores, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                stores = excluded.stores,
+                updated_at = excluded.updated_at
+            """,
+            (session_id, json.dumps(persistent, ensure_ascii=False), time.time()),
+        )
+        self._conn.commit()
+
     def save_history(self, session_id: str, records: list[MessageRecord]) -> None:
         """Перезаписывает историю сессии целиком (для снапшота при ветвлении).
 
@@ -426,6 +453,18 @@ class SessionStore:
                         for item in loaded_facts
                         if isinstance(item, str)
                         or (isinstance(item, (list, tuple)) and len(item) == 2)
+                    ]
+            memory_row = self._conn.execute(
+                "SELECT stores FROM session_memory WHERE session_id = ?",
+                (row["id"],),
+            ).fetchone()
+            if memory_row is not None:
+                loaded_stores = json.loads(memory_row["stores"] or "[]")
+                if isinstance(loaded_stores, list):
+                    chat.memory_stores = [
+                        MemoryStore.from_dict(store)
+                        for store in loaded_stores
+                        if isinstance(store, dict)
                     ]
             result.append(chat)
         return result

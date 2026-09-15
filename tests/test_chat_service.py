@@ -6,9 +6,12 @@ from server.pricing import message_cost
 from server.services.chat_service import (
     FACTS_MESSAGE_PREFIX,
     FACTS_SYSTEM_PROMPT,
+    MEMORY_INSTRUCTION,
+    MEMORY_MESSAGE_PREFIX,
     SUMMARY_MESSAGE_PREFIX,
     SUMMARIZER_SYSTEM_PROMPT,
     ChatService,
+    MemoryStore,
     MessageMeta,
     SessionKind,
 )
@@ -627,3 +630,79 @@ def test_extract_facts_noop_for_other_strategy():
     runner = ScriptedRunner([])
     assert run_coro(svc.extract_facts(runner, spec_obj(), GenerationSettings(), "q")) is None
     assert runner.calls == []
+
+
+# ── Память чата ─────────────────────────────────────────────────────────────
+
+def test_memory_frame_empty_returns_none():
+    svc = ChatService("c1", model="m")
+    assert svc.memory_frame() is None
+    svc.memory_stores = [MemoryStore("m1", "Профиль", True, [])]
+    assert svc.memory_frame() is None
+
+
+def test_memory_frame_format():
+    svc = ChatService("c1", model="m")
+    svc.memory_stores = [
+        MemoryStore("m1", "Профиль", True, [["Имя", "Иван"], ["Город", "Москва"]]),
+        MemoryStore("m2", "Прочее", False, [["Тема", "API"]]),
+    ]
+    frame = svc.memory_frame()
+    assert MEMORY_MESSAGE_PREFIX in frame
+    assert "## Профиль" in frame
+    assert "Имя: Иван" in frame
+    assert "## Прочее" in frame
+    assert "Тема: API" in frame
+    # инструкция требует использовать память только по необходимости
+    assert MEMORY_INSTRUCTION in frame
+
+
+def test_memory_frame_injected_after_system():
+    settings = GenerationSettings()
+    svc = ChatService("c1", model="m", system_prompt="sys", settings=settings)
+    svc.add_user_message("q")
+    svc.memory_stores = [MemoryStore("m1", "Профиль", True, [["Имя", "Иван"]])]
+    msgs = svc.build_request_messages()
+    assert msgs[0] == {"role": "system", "content": "sys"}
+    assert MEMORY_MESSAGE_PREFIX in msgs[1]["content"]
+    assert msgs[-1] == {"role": "user", "content": "q"}
+
+
+def test_memory_frame_top_when_no_system_in_window():
+    # sliding без system в окне -> рамка памяти идёт первой
+    settings = strategy_settings("sliding", n=1)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 3, pending_user="u4")
+    svc.memory_stores = [MemoryStore("m1", "Профиль", True, [["Имя", "Иван"]])]
+    msgs = svc.build_request_messages()
+    assert msgs[0]["role"] == "user"
+    assert MEMORY_MESSAGE_PREFIX in msgs[0]["content"]
+    assert all(m["content"] != "инструкция" for m in msgs)
+
+
+def test_memory_frame_and_facts_frame_together():
+    settings = strategy_settings("facts", k=2)
+    svc = ChatService("c1", model="m", settings=settings)
+    fill_chat(svc, 3, pending_user="u4")
+    svc.facts = [["Имя", "Аня"]]
+    svc.memory_stores = [MemoryStore("m1", "Профиль", True, [["Роль", "QA"]])]
+    msgs = svc.build_request_messages()
+    assert MEMORY_MESSAGE_PREFIX in msgs[0]["content"]
+    assert FACTS_MESSAGE_PREFIX in msgs[1]["content"]
+
+
+def test_memory_frame_in_summarize_path():
+    settings = cs_settings(3)
+    svc = ChatService("c1", model="m", system_prompt="sys", settings=settings)
+    svc.add_user_message("q")
+    svc.memory_stores = [MemoryStore("m1", "Профиль", True, [["Имя", "Иван"]])]
+    msgs = svc.build_request_messages(summary_items=["S1"])
+    assert msgs[0] == {"role": "system", "content": "sys"}
+    assert MEMORY_MESSAGE_PREFIX in msgs[1]["content"]
+    assert SUMMARY_MESSAGE_PREFIX in msgs[2]["content"]
+
+
+def test_memory_frame_absent_for_non_chat():
+    svc = ChatService("c1", kind=SessionKind.SUMMARY, model="m")
+    svc.memory_stores = [MemoryStore("m1", "Профиль", True, [["Имя", "Иван"]])]
+    assert svc.memory_frame() is None
