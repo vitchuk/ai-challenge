@@ -208,6 +208,16 @@ class SessionRegistry:
             return
         self._store.save_facts(chat.id, chat.facts)
 
+    def persist_memory(self, chat: ChatService) -> None:
+        """Персистит память чата (только персистентные вкладки).
+
+        Args:
+            chat: сессия со списком ``memory_stores``.
+        """
+        if self._store is None or chat.kind == SessionKind.EPHEMERAL:
+            return
+        self._store.save_memory(chat.id, chat.memory_stores)
+
     def branch(self, chat: ChatService, title: Optional[str] = None) -> ChatService:
         """Создаёт чат-снапшот (ветку) от существующего чата.
 
@@ -247,6 +257,7 @@ class SessionRegistry:
         new.summarized_chunks = chat.summarized_chunks
         new.summary_items = list(chat.summary_items)
         new.facts = list(chat.facts)
+        new.memory_stores = copy.deepcopy(chat.memory_stores)
 
         self._sessions[chat_id] = new
         if self._store is not None:
@@ -258,6 +269,8 @@ class SessionRegistry:
                 )
             if new.facts:
                 self._store.save_facts(new.id, new.facts)
+            if any(store.persistent for store in new.memory_stores):
+                self._store.save_memory(new.id, new.memory_stores)
         return new
 
     @staticmethod

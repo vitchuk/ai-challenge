@@ -14,14 +14,67 @@ from ..providers.base import ProviderError
 from ..providers.client import StreamedCompletion
 from ..schemas import (
     BranchRequest,
+    MemorySyncRequest,
     MessageCreateRequest,
     SessionCreateRequest,
     SessionCreateResponse,
 )
-from ..services import ChatService, SessionKind, sanitize_settings
+from ..services import ChatService, MemoryStore, SessionKind, sanitize_settings
 from ..services.registry import SessionRegistry
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+#: Лимиты памяти чата (невалидное молча отбрасывается).
+MAX_MEMORY_STORES = 50
+MAX_MEMORY_ITEMS = 500
+MAX_MEMORY_NAME = 100
+MAX_MEMORY_KEY = 200
+MAX_MEMORY_VALUE = 2000
+
+
+def _sanitize_memory(raw_stores) -> list:
+    """Валидирует и нормализует список вкладок памяти чата.
+
+    Args:
+        raw_stores: «сырой» список вкладок из запроса.
+
+    Returns:
+        Список :class:`MemoryStore` (невалидные элементы отброшены).
+    """
+    if not isinstance(raw_stores, list):
+        return []
+    stores = []
+    for raw in raw_stores[:MAX_MEMORY_STORES]:
+        if not isinstance(raw, dict):
+            continue
+        name = raw.get("name")
+        name = name.strip()[:MAX_MEMORY_NAME] if isinstance(name, str) else ""
+        if not name:
+            continue
+        store_id = raw.get("id")
+        store_id = store_id.strip()[:64] if isinstance(store_id, str) and store_id.strip() else None
+        items = []
+        raw_items = raw.get("items")
+        for item in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            key, value = item[0], item[1]
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            key, value = key.strip(), value.strip()
+            if key and value:
+                items.append([key[:MAX_MEMORY_KEY], value[:MAX_MEMORY_VALUE]])
+            if len(items) >= MAX_MEMORY_ITEMS:
+                break
+        stores.append(
+            MemoryStore(
+                id=store_id or f"mem-{len(stores) + 1}",
+                name=name,
+                persistent=bool(raw.get("persistent", False)),
+                items=items,
+            )
+        )
+    return stores
 
 
 def _thousands(n: int) -> str:
@@ -141,6 +194,7 @@ async def list_sessions(request: Request) -> dict:
                 "history": [m.to_dict() for m in session.history],
                 "requests": [r.to_dict() for r in session.requests],
                 "facts": list(session.facts),
+                "memory": [s.to_dict() for s in session.memory_stores],
                 "title": session.title,
                 "parent_id": session.parent_id,
             }
@@ -189,9 +243,41 @@ async def get_session(session_id: str, request: Request) -> dict:
         "history": [m.to_dict() for m in session.history],
         "requests": [r.to_dict() for r in session.requests],
         "facts": list(session.facts),
+        "memory": [s.to_dict() for s in session.memory_stores],
         "title": session.title,
         "parent_id": session.parent_id,
     }
+
+
+@router.put("/{session_id}/memory")
+async def sync_memory(
+    session_id: str, body: MemorySyncRequest, request: Request
+) -> dict:
+    """Синхронизирует память чата (полное состояние вкладок «Память»).
+
+    Клиент присылает все вкладки со своими флагами персистентности; сервер
+    заменяет состояние и сохраняет в БД только персистентные вкладки.
+
+    Args:
+        session_id: идентификатор сессии.
+        body: список вкладок памяти.
+        request: HTTP-запрос.
+
+    Returns:
+        Санированное состояние памяти ``{"memory": [...]}``.
+
+    Raises:
+        HTTPException: 404 — сессия не найдена; 400 — не обычный чат.
+    """
+    registry: SessionRegistry = request.app.state.registry
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+    if session.kind != SessionKind.CHAT:
+        raise HTTPException(400, "Memory is available for chat sessions only")
+    session.memory_stores = _sanitize_memory(body.stores)
+    registry.persist_memory(session)
+    return {"memory": [s.to_dict() for s in session.memory_stores]}
 
 
 @router.post("/{session_id}/branch", status_code=201, response_model=SessionCreateResponse)

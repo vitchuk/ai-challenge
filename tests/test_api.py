@@ -740,3 +740,119 @@ async def test_branch_errors(app, client):
     assert (
         await client.post(f"/api/sessions/{summary}/branch", json={})
     ).status_code == 400
+
+
+# ── Память чата ─────────────────────────────────────────────────────────────
+
+MEMORY_STORES = [
+    {
+        "id": "m1",
+        "name": "Профиль",
+        "persistent": True,
+        "items": [["Имя", "Иван"], ["Город", "Москва"]],
+    },
+    {"id": "m2", "name": "Черновик", "persistent": False, "items": [["Тема", "API"]]},
+]
+
+
+async def test_memory_sync_and_injection(app, client):
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    # первое сообщение — сид
+    await client.post(f"/api/sessions/{sid}/messages", json={"content": "инструкция"})
+
+    r = await client.put(f"/api/sessions/{sid}/memory", json={"stores": MEMORY_STORES})
+    assert r.status_code == 200
+    assert [s["name"] for s in r.json()["memory"]] == ["Профиль", "Черновик"]
+
+    state = (await client.get(f"/api/sessions/{sid}")).json()
+    assert [s["name"] for s in state["memory"]] == ["Профиль", "Черновик"]
+
+    # память из всех вкладок попадает в основной запрос
+    transport = app.state.mock_transport
+    await client.post(f"/api/sessions/{sid}/messages", json={"content": "вопрос"})
+    body = json.loads(transport.requests[-1].content)
+    memory_msg = body["messages"][1]
+    assert body["messages"][0]["role"] == "system"
+    assert "[Память чата]" in memory_msg["content"]
+    assert "Имя: Иван" in memory_msg["content"]
+    assert "Тема: API" in memory_msg["content"]
+
+
+async def test_memory_errors(app, client):
+    assert (
+        await client.put("/api/sessions/nope/memory", json={"stores": []})
+    ).status_code == 404
+    summary = (
+        await client.post("/api/sessions", json={"kind": "summary"})
+    ).json()["id"]
+    assert (
+        await client.put(f"/api/sessions/{summary}/memory", json={"stores": []})
+    ).status_code == 400
+
+
+async def test_memory_state_replaced_on_full_sync(app, client):
+    """Полный синк заменяет состояние: устаревшие неперсистентные вкладки уходят."""
+    sid = (await client.post("/api/sessions", json={})).json()["id"]
+    r = await client.put(f"/api/sessions/{sid}/memory", json={"stores": MEMORY_STORES})
+    assert r.status_code == 200
+    assert len(r.json()["memory"]) == 2
+
+    # клиент пересинхронизирует состояние без неперсистентной вкладки
+    persistent_only = [s for s in MEMORY_STORES if s["persistent"]]
+    r = await client.put(
+        f"/api/sessions/{sid}/memory", json={"stores": persistent_only}
+    )
+    assert [s["name"] for s in r.json()["memory"]] == ["Профиль"]
+    state = (await client.get(f"/api/sessions/{sid}")).json()
+    assert [s["name"] for s in state["memory"]] == ["Профиль"]
+
+
+async def test_memory_persistent_only_after_restart(tmp_path, monkeypatch):
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import MockTransport, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+    db = str(tmp_path / "chats.db")
+
+    def build():
+        application = create_app()
+        transport = MockTransport(make_chat_chunks(content="Ответ", usage=USAGE))
+        application.state.http_client = httpx.AsyncClient(transport=transport)
+        application.state.opencode_session_id = "s"
+        application.state.registry = SessionRegistry(
+            config.get_settings(), store=SessionStore(db)
+        )
+        application.state.registry.restore()
+        return application
+
+    app1 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://t") as c1:
+        sid = (await c1.post("/api/sessions", json={})).json()["id"]
+        r = await c1.put(f"/api/sessions/{sid}/memory", json={"stores": MEMORY_STORES})
+        assert r.status_code == 200
+    await app1.state.http_client.aclose()
+
+    app2 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://t") as c2:
+        state = (await c2.get(f"/api/sessions/{sid}")).json()
+        # восстановилась только персистентная вкладка
+        assert [s["name"] for s in state["memory"]] == ["Профиль"]
+        assert state["memory"][0]["persistent"] is True
+    await app2.state.http_client.aclose()
+
+
+async def test_branch_copies_memory(app, client):
+    sid = (await client.post("/api/sessions", json={})).json()["id"]
+    await client.put(f"/api/sessions/{sid}/memory", json={"stores": MEMORY_STORES})
+    r = await client.post(f"/api/sessions/{sid}/branch", json={"title": "Ветка"})
+    assert r.status_code == 201
+    state = (await client.get(f"/api/sessions/{r.json()['id']}")).json()
+    assert [s["name"] for s in state["memory"]] == ["Профиль", "Черновик"]

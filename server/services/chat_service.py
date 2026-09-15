@@ -51,6 +51,16 @@ FACTS_MESSAGE_PREFIX = "[Установленные факты]"
 #: Указание опираться на факты (добавляется к рамке фактов).
 FACTS_INSTRUCTION = "Опирайся на эти факты при ответе и не выдумывай нового."
 
+#: Рамка служебного сообщения с памятью чата в основном запросе.
+MEMORY_MESSAGE_PREFIX = "[Память чата]"
+
+#: Указание использовать память (добавляется к рамке памяти).
+MEMORY_INSTRUCTION = (
+    "Это справочная память чата, а не тема разговора. Используй эти данные, "
+    "только если запрос пользователя напрямую их касается. Не перечисляй "
+    "память в ответах без необходимости и не упоминай, что она у тебя есть."
+)
+
 
 class SessionKind(str, Enum):
     """Тип сессии (чата)."""
@@ -107,6 +117,43 @@ class RequestRecord:
             reasoning_tokens=data.get("reasoning_tokens"),
             created_at=data.get("created_at", 0.0),
             persisted=persisted,
+        )
+
+
+@dataclass
+class MemoryStore:
+    """Вкладка «Памяти» чата: именованное хранилище пар «ключ — значение».
+
+    Attributes:
+        id: идентификатор вкладки (клиентский или сгенерированный сервером).
+        name: название вкладки.
+        persistent: сохраняется ли содержимое вкладки в БД.
+        items: пары ``[[ключ, значение], …]``.
+    """
+
+    id: str
+    name: str
+    persistent: bool = False
+    items: list = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Представляет вкладку как словарь (для API/БД)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "persistent": self.persistent,
+            "items": [list(item) for item in self.items],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MemoryStore":
+        """Восстанавливает вкладку из словаря (из БД/API)."""
+        items = data.get("items")
+        return cls(
+            id=str(data.get("id", "")),
+            name=str(data.get("name", "")),
+            persistent=bool(data.get("persistent", False)),
+            items=[list(item) for item in items] if isinstance(items, list) else [],
         )
 
 
@@ -232,6 +279,8 @@ class ChatService:
         self.summarized_chunks: int = 0
         # Канонические факты (стратегия facts).
         self.facts: list[str] = []
+        # Память чата: именованные хранилища пар «ключ — значение».
+        self.memory_stores: list[MemoryStore] = []
         # Метаданные ответвлённого чата (снапшот): родитель и своё название.
         self.parent_id: Optional[str] = None
         self.title: Optional[str] = None
@@ -477,6 +526,34 @@ class ChatService:
         if isinstance(item, (list, tuple)) and len(item) == 2:
             return f"{item[0]}: {item[1]}"
         return str(item)
+
+    def memory_frame(self) -> Optional[str]:
+        """Служебный блок «Память чата» (или ``None``, если данных нет).
+
+        Только для обычных чатов: секции по вкладкам памяти с парами
+        «ключ: значение» и указанием использовать данные.
+
+        Returns:
+            Текст служебного сообщения или ``None``.
+        """
+        if self.kind != SessionKind.CHAT:
+            return None
+        sections = []
+        for store in self.memory_stores:
+            lines = "\n".join(
+                f"{item[0]}: {item[1]}"
+                for item in store.items
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            )
+            if lines:
+                sections.append(f"## {store.name}\n{lines}")
+        if not sections:
+            return None
+        return (
+            f"{MEMORY_MESSAGE_PREFIX}\n"
+            + "\n\n".join(sections)
+            + f"\n\n{MEMORY_INSTRUCTION}"
+        )
 
     def _history_exchanges(self) -> list[list[MessageRecord]]:
         """Обмены по всей истории, включая сид.
@@ -762,7 +839,9 @@ class ChatService:
         Способ сборки зависит от стратегии контекста чата (только
         ``kind=chat``): ``none``/``branching`` — вся история, ``summarize`` —
         саммари чанков, ``sliding`` — окно последних реплик, ``facts`` —
-        служебный блок фактов + окно реплик.
+        служебный блок фактов + окно реплик. Дополнительно (для обычных
+        чатов) в начало после system-сообщения подставляется блок «Память
+        чата» из всех вкладок памяти.
 
         Args:
             summary_items: текущие саммари (для стратегии summarize).
@@ -783,6 +862,12 @@ class ChatService:
             messages = self._windowed_messages(strategy.k, facts=True)
         else:
             messages = self.to_openai_messages()
+
+        # Память чата — служебный блок сразу после system-сообщения.
+        memory = self.memory_frame()
+        if memory:
+            index = 1 if messages and messages[0]["role"] == "system" else 0
+            messages.insert(index, {"role": "user", "content": memory})
 
         if extra_system:
             messages.insert(0, {"role": "system", "content": extra_system})

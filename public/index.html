@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Помогатор2К</title>
-  <link rel="stylesheet" href="style.css?v=14" />
+  <link rel="stylesheet" href="style.css?v=16" />
 </head>
 <body>
   <div class="app">
@@ -17,7 +17,21 @@
     </aside>
 
     <div class="chat" id="chat-column">
-      <div class="chat__main">
+      <div class="chat__views" id="chat-views">
+        <button
+          id="view-tab-chat"
+          class="chat__view-tab chat__view-tab--active"
+          type="button"
+        >
+          Чат
+        </button>
+        <button id="view-tab-memory" class="chat__view-tab" type="button">
+          Память
+        </button>
+      </div>
+
+      <div class="chat__content">
+        <div class="chat__main" id="chat-main">
         <main id="messages" class="chat__body"></main>
 
         <form id="form" class="chat__form">
@@ -44,12 +58,43 @@
         <div id="chat-info" class="chat-info"></div>
       </div>
 
+      <section id="memory-view" class="chat__memory" hidden>
+        <div id="memory-tabs" class="memory__tabs">
+          <div id="memory-tab-list" class="memory__tab-list"></div>
+          <div class="memory__create">
+            <input
+              id="memory-new-name"
+              class="memory__name"
+              type="text"
+              placeholder="Название вкладки"
+            />
+            <button
+              id="memory-db-toggle"
+              class="memory__db"
+              type="button"
+              title="Сохранять в базу данных"
+              aria-pressed="false"
+            ></button>
+            <button
+              id="memory-add"
+              class="memory__add"
+              type="button"
+              title="Создать вкладку"
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div id="memory-editor" class="memory__editor"></div>
+      </section>
+
       <div id="facts-splitter" class="chat__splitter" hidden></div>
       <aside id="facts-panel" class="chat__facts" hidden>
         <div class="chat__facts-head">Факты</div>
         <ol id="facts-list" class="chat__facts-list"></ol>
         <div id="facts-empty" class="chat__facts-empty">Фактов пока нет</div>
       </aside>
+      </div>
     </div>
 
     <aside class="settings">
@@ -258,6 +303,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

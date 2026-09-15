@@ -176,6 +176,32 @@ def test_facts_parent_and_history_roundtrip(tmp_path):
     store.close()
 
 
+def test_memory_roundtrip_persistent_only(tmp_path):
+    from server.services.chat_service import MemoryStore
+
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    chat = make_chat()
+    store.save_session(chat)
+    stores = [
+        MemoryStore("m1", "Профиль", True, [["Имя", "Иван"]]),
+        MemoryStore("m2", "Временная", False, [["x", "y"]]),
+    ]
+    store.save_memory(chat.id, stores)
+
+    loaded = store.load_all()[0]
+    # сохраняются только персистентные вкладки
+    assert len(loaded.memory_stores) == 1
+    assert loaded.memory_stores[0].name == "Профиль"
+    assert loaded.memory_stores[0].persistent is True
+    assert loaded.memory_stores[0].items == [["Имя", "Иван"]]
+
+    # повторный синк с пустым списком очищает память
+    store.save_memory(chat.id, [])
+    assert store.load_all()[0].memory_stores == []
+    store.close()
+
+
 def test_migrates_missing_reasoning_column(tmp_path):
     """Ранее созданная БД без llm_requests.reasoning_tokens досоздаётся."""
     import sqlite3
