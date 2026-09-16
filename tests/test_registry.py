@@ -1,7 +1,12 @@
 """Тесты реестра сессий."""
 
 from server import toon_codec
-from server.services.chat_service import MessageMeta, SessionKind
+from server.services.chat_service import (
+    PROFILE_FIELDS,
+    MessageMeta,
+    Profile,
+    SessionKind,
+)
 from server.services.generation import GenerationSettings
 from server.services.registry import SessionRegistry
 from server.services.storage import SessionStore
@@ -174,4 +179,54 @@ def test_active_persists_across_restart(tmp_path):
     reg2 = make_registry_with_store(db)
     reg2.restore()
     assert reg2.get_active() == a.id
+    reg2.close()
+
+
+# ── Профили пользователя ────────────────────────────────────────────────────
+
+def full_fields(value: str = "v") -> dict:
+    return {key: value for key, _ in PROFILE_FIELDS}
+
+
+def test_profiles_replace_and_active():
+    reg = SessionRegistry()
+    p = Profile(id="p1", name="Основной", fields=full_fields())
+    reg.replace_profiles([p], "p1")
+    assert [x.id for x in reg.list_profiles()] == ["p1"]
+    assert reg.get_active_profile_id() == "p1"
+    assert reg.get_active_profile().name == "Основной"
+    # активный снимается, если такого профиля нет
+    reg.replace_profiles([p], "nope")
+    assert reg.get_active_profile_id() is None
+
+
+def test_active_profile_block_only_when_complete():
+    reg = SessionRegistry()
+    assert reg.active_profile_block() is None
+
+    incomplete = Profile(id="x", name="Неполный", fields={"address": "Иван"})
+    reg.replace_profiles([incomplete], "x")
+    assert reg.active_profile_block() is None
+
+    complete = Profile(id="y", name="Полный", fields=full_fields("значение"))
+    reg.replace_profiles([complete], "y")
+    block = reg.active_profile_block()
+    assert block is not None
+    assert "следует профилю пользователя" in block
+    assert "[Профиль пользователя]" in block
+    assert "Как ко мне обращаться: значение" in block
+
+
+def test_profiles_persist_across_restart(tmp_path):
+    db = str(tmp_path / "t.db")
+    reg = make_registry_with_store(db)
+    p = Profile(id="p1", name="Основной", fields=full_fields("значение"))
+    reg.replace_profiles([p], "p1")
+    reg.close()
+
+    reg2 = make_registry_with_store(db)
+    reg2.restore()
+    assert [x.id for x in reg2.list_profiles()] == ["p1"]
+    assert reg2.get_active_profile_id() == "p1"
+    assert reg2.get_active_profile().fields["address"] == "значение"
     reg2.close()

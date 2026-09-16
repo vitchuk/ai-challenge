@@ -1,6 +1,12 @@
 """Тесты слоя хранения сессий (SQLite)."""
 
-from server.services.chat_service import ChatService, MessageMeta, SessionKind
+from server.services.chat_service import (
+    PROFILE_FIELDS,
+    ChatService,
+    MessageMeta,
+    Profile,
+    SessionKind,
+)
 from server.services.generation import GenerationSettings
 from server.services.storage import SessionStore
 
@@ -254,3 +260,49 @@ def test_migrates_missing_reasoning_column(tmp_path):
     )
     assert store.load_all()[0].requests[0].reasoning_tokens == 3
     store.close()
+
+
+# ── Профили пользователя ────────────────────────────────────────────────────
+
+def profile_fields(value: str = "v") -> dict:
+    return {key: f"{value}-{key}" for key, _ in PROFILE_FIELDS}
+
+
+def test_profiles_roundtrip(tmp_path):
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    fields = profile_fields()
+    store.save_profiles([Profile(id="p1", name="Основной", fields=fields)], "p1")
+
+    loaded = store.load_profiles()
+    assert [x.id for x in loaded] == ["p1"]
+    assert loaded[0].name == "Основной"
+    assert loaded[0].fields == fields
+    assert store.get_state("active_profile") == "p1"
+    store.close()
+
+
+def test_profiles_full_replace_clears_active(tmp_path):
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    fields = profile_fields()
+    store.save_profiles([Profile(id="a", name="A", fields=fields)], "a")
+    store.save_profiles([Profile(id="b", name="B", fields=fields)], None)
+
+    assert [x.id for x in store.load_profiles()] == ["b"]
+    assert store.get_state("active_profile") is None
+    store.close()
+
+
+def test_profiles_persist_across_reopen(tmp_path):
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    store.save_profiles(
+        [Profile(id="p", name="P", fields=profile_fields())], "p"
+    )
+    store.close()
+
+    store2 = SessionStore(db)
+    assert [x.id for x in store2.load_profiles()] == ["p"]
+    assert store2.get_state("active_profile") == "p"
+    store2.close()

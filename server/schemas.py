@@ -35,6 +35,13 @@ class MemorySyncRequest(BaseModel):
     stores: list[dict[str, Any]] = []
 
 
+class ProfilesSyncRequest(BaseModel):
+    """Тело ``PUT /api/profiles`` — полное состояние профилей пользователя."""
+
+    profiles: list[dict[str, Any]] = []
+    active_id: Optional[str] = None
+
+
 class MessageCreateRequest(BaseModel):
     """Тело ``POST /api/sessions/{id}/messages``."""
 

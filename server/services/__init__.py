@@ -1,6 +1,13 @@
 """Сервисный слой: инкапсуляция чатов, параметры генерации, реестр сессий."""
 
-from .chat_service import ChatService, MemoryStore, MessageMeta, MessageRecord, SessionKind
+from .chat_service import (
+    ChatService,
+    MemoryStore,
+    MessageMeta,
+    MessageRecord,
+    Profile,
+    SessionKind,
+)
 from .generation import GenerationSettings, sanitize_settings
 from .registry import SessionRegistry
 from .storage import SessionStore
@@ -11,6 +18,7 @@ __all__ = [
     "MemoryStore",
     "MessageMeta",
     "MessageRecord",
+    "Profile",
     "SessionKind",
     "SessionRegistry",
     "SessionStore",

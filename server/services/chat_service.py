@@ -61,6 +61,27 @@ MEMORY_INSTRUCTION = (
     "память в ответах без необходимости и не упоминай, что она у тебя есть."
 )
 
+#: Поля профиля пользователя: (ключ, подпись для промпта). Порядок важен —
+#: в нём поля показываются в UI и собираются в системный блок.
+PROFILE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("address", "Как ко мне обращаться"),
+    ("style", "Стиль общения"),
+    ("language", "Язык диалога"),
+    ("format", "Формат ответа"),
+    ("limit", "Ограничение ответа"),
+)
+
+#: Рамка служебного блока профиля в системном промпте.
+PROFILE_MESSAGE_PREFIX = "[Профиль пользователя]"
+
+#: Вступление системного промпта профиля (идёт перед данными профиля).
+PROFILE_SYSTEM_PREFIX = (
+    "Ты полезный ассистент, который следует профилю пользователя во всех "
+    "ответах. Базовые правила безопасности и фактической точности имеют "
+    "приоритет над профилем. Не сообщай, что ты используешь профиль, если "
+    "пользователь об этом не попросил явно."
+)
+
 
 class SessionKind(str, Enum):
     """Тип сессии (чата)."""
@@ -154,6 +175,51 @@ class MemoryStore:
             name=str(data.get("name", "")),
             persistent=bool(data.get("persistent", False)),
             items=[list(item) for item in items] if isinstance(items, list) else [],
+        )
+
+
+@dataclass
+class Profile:
+    """Профиль пользователя — глобальная сущность (не привязана к чату).
+
+    Хранит название и фиксированный набор полей (см. :data:`PROFILE_FIELDS`),
+    подставляемых в системный промпт основного запроса. Активный профиль
+    один на всё приложение.
+
+    Attributes:
+        id: идентификатор профиля.
+        name: название профиля.
+        fields: словарь ``{ключ: значение}`` (только ключи из
+            :data:`PROFILE_FIELDS`).
+    """
+
+    id: str
+    name: str
+    fields: dict = field(default_factory=dict)
+
+    def is_complete(self) -> bool:
+        """Заполнены ли название и все поля профиля."""
+        if not self.name.strip():
+            return False
+        return all(str(self.fields.get(key, "")).strip() for key, _ in PROFILE_FIELDS)
+
+    def to_dict(self) -> dict:
+        """Представляет профиль как словарь (для API/БД)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "fields": {key: str(self.fields.get(key, "")) for key, _ in PROFILE_FIELDS},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Profile":
+        """Восстанавливает профиль из словаря (из БД/API)."""
+        fields = data.get("fields")
+        fields = fields if isinstance(fields, dict) else {}
+        return cls(
+            id=str(data.get("id", "")),
+            name=str(data.get("name", "")),
+            fields={key: str(fields.get(key, "")) for key, _ in PROFILE_FIELDS},
         )
 
 

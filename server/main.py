@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .api.models import router as models_router
+from .api.profiles import router as profiles_router
 from .api.sessions import router as sessions_router
 from .config import Settings, get_settings
 from .services.registry import SessionRegistry
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
 
     app.include_router(sessions_router)
     app.include_router(models_router)
+    app.include_router(profiles_router)
     app.mount("/", StaticFiles(directory=PUBLIC_DIR, html=True), name="static")
     return app
 
