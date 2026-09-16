@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Помогатор2К</title>
-  <link rel="stylesheet" href="style.css?v=16" />
+  <link rel="stylesheet" href="style.css?v=17" />
 </head>
 <body>
   <div class="app">
@@ -27,6 +27,14 @@
         </button>
         <button id="view-tab-memory" class="chat__view-tab" type="button">
           Память
+        </button>
+        <button
+          id="view-tab-profile"
+          class="chat__view-tab chat__view-tab--profile"
+          type="button"
+        >
+          <span id="view-tab-profile-icon" class="chat__view-icon"></span>
+          Профиль
         </button>
       </div>
 
@@ -86,6 +94,29 @@
           </div>
         </div>
         <div id="memory-editor" class="memory__editor"></div>
+      </section>
+
+      <section id="profile-view" class="chat__profile" hidden>
+        <div id="profile-tabs" class="memory__tabs">
+          <div id="profile-tab-list" class="memory__tab-list"></div>
+          <div class="memory__create">
+            <input
+              id="profile-new-name"
+              class="memory__name"
+              type="text"
+              placeholder="Название профиля"
+            />
+            <button
+              id="profile-add"
+              class="memory__add"
+              type="button"
+              title="Создать профиль"
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div id="profile-editor" class="memory__editor"></div>
       </section>
 
       <div id="facts-splitter" class="chat__splitter" hidden></div>
@@ -303,6 +334,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=16"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

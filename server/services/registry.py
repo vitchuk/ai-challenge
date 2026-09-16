@@ -14,7 +14,15 @@ from typing import Optional
 
 from ..config import Settings
 from ..toon_codec import encode as toon_encode
-from .chat_service import ChatService, MessageRecord, SessionKind
+from .chat_service import (
+    PROFILE_FIELDS,
+    PROFILE_MESSAGE_PREFIX,
+    PROFILE_SYSTEM_PREFIX,
+    ChatService,
+    MessageRecord,
+    Profile,
+    SessionKind,
+)
 from .storage import SessionStore
 
 SUMMARY_CONTEXT_PROMPT = (
@@ -36,8 +44,11 @@ class SessionRegistry:
         self._store = store
         self._sessions: dict[str, ChatService] = {}
         self._active_id: Optional[str] = None
+        self._profiles: dict[str, Profile] = {}
+        self._active_profile_id: Optional[str] = None
         if self._store is not None:
             self._active_id = self._store.get_state("active_session")
+            self._active_profile_id = self._store.get_state("active_profile")
 
     def create(
         self,
@@ -83,6 +94,7 @@ class SessionRegistry:
         loaded = self._store.load_all()
         for service in loaded:
             self._sessions[service.id] = service
+        self._profiles = {profile.id: profile for profile in self._store.load_profiles()}
         return len(loaded)
 
     def close(self) -> None:
@@ -217,6 +229,66 @@ class SessionRegistry:
         if self._store is None or chat.kind == SessionKind.EPHEMERAL:
             return
         self._store.save_memory(chat.id, chat.memory_stores)
+
+    def list_profiles(self) -> list[Profile]:
+        """Возвращает список всех профилей пользователя."""
+        return list(self._profiles.values())
+
+    def get_profile(self, profile_id: Optional[str]) -> Optional[Profile]:
+        """Возвращает профиль по идентификатору (или ``None``)."""
+        if not profile_id:
+            return None
+        return self._profiles.get(profile_id)
+
+    def get_active_profile(self) -> Optional[Profile]:
+        """Возвращает активный профиль (или ``None``)."""
+        return self.get_profile(self.get_active_profile_id())
+
+    def get_active_profile_id(self) -> Optional[str]:
+        """Возвращает id активного профиля (валидируя его существование)."""
+        if self._active_profile_id and self._active_profile_id in self._profiles:
+            return self._active_profile_id
+        return None
+
+    def replace_profiles(
+        self,
+        profiles: list[Profile],
+        active_id: Optional[str] = None,
+    ) -> None:
+        """Полностью заменяет профили и активный профиль (полный синк).
+
+        Args:
+            profiles: новый полный список профилей.
+            active_id: идентификатор активного профиля; если такого профиля
+                нет (или ``None``) — активный профиль снимается.
+        """
+        self._profiles = {profile.id: profile for profile in profiles}
+        self._active_profile_id = (
+            active_id if active_id in self._profiles else None
+        )
+        if self._store is not None:
+            self._store.save_profiles(
+                list(self._profiles.values()), self._active_profile_id
+            )
+
+    def active_profile_block(self) -> Optional[str]:
+        """Собирает системный блок активного профиля (или ``None``).
+
+        Возвращает вступление :data:`PROFILE_SYSTEM_PREFIX` и данные профиля
+        (``подпись: значение`` по всем полям). ``None``, если активного
+        профиля нет или он не заполнен полностью.
+
+        Returns:
+            Текст служебного system-сообщения или ``None``.
+        """
+        profile = self.get_active_profile()
+        if profile is None or not profile.is_complete():
+            return None
+        lines = "\n".join(
+            f"{label}: {str(profile.fields.get(key, '')).strip()}"
+            for key, label in PROFILE_FIELDS
+        )
+        return f"{PROFILE_SYSTEM_PREFIX}\n\n{PROFILE_MESSAGE_PREFIX}\n{lines}"
 
     def branch(self, chat: ChatService, title: Optional[str] = None) -> ChatService:
         """Создаёт чат-снапшот (ветку) от существующего чата.

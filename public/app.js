@@ -38,6 +38,13 @@ const memoryNewName = document.getElementById('memory-new-name');
 const memoryDbToggle = document.getElementById('memory-db-toggle');
 const memoryAdd = document.getElementById('memory-add');
 const memoryEditor = document.getElementById('memory-editor');
+const viewTabProfile = document.getElementById('view-tab-profile');
+const viewTabProfileIcon = document.getElementById('view-tab-profile-icon');
+const profileView = document.getElementById('profile-view');
+const profileTabList = document.getElementById('profile-tab-list');
+const profileNewName = document.getElementById('profile-new-name');
+const profileAdd = document.getElementById('profile-add');
+const profileEditor = document.getElementById('profile-editor');
 const factsPanel = document.getElementById('facts-panel');
 const factsList = document.getElementById('facts-list');
 const factsEmpty = document.getElementById('facts-empty');
@@ -160,14 +167,40 @@ const DB_ICON_SVG =
   '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>' +
   '<path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>';
 
+// Иконка «человечек» — для кнопки-вида «Профиль».
+const PROFILE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg>';
+
+// Зелёная галочка активного профиля.
+const CHECK_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M5 13l4 4L19 7"/></svg>';
+
+// Обязательные поля профиля пользователя (ключ — как на сервере).
+const PROFILE_FIELDS = [
+  { key: 'address', label: 'Как ко мне обращаться', placeholder: 'Например: Иван' },
+  { key: 'style', label: 'Стиль общения', placeholder: 'Например: кратко и по делу' },
+  { key: 'language', label: 'Язык диалога', placeholder: 'Например: русский' },
+  { key: 'format', label: 'Формат ответа', placeholder: 'Например: структурированный текст' },
+  { key: 'limit', label: 'Ограничение ответа', placeholder: 'Например: не более 5 предложений' }
+];
+
 const chats = [];
 let activeChatId = null;
 let chatCounter = 0;
 let tokensBurned = 0;
 let selectedModel = null;
-// Вид основной области: 'chat' | 'memory'; флаг «сохранять в БД» для новой вкладки.
+// Вид основной области: 'chat' | 'memory' | 'profile'; флаг «сохранять в БД»
+// для новой вкладки памяти.
 let activeView = 'chat';
 let memoryDbPersistent = false;
+// Профили пользователя (глобальные): список, активный и выбранная вкладка UI.
+let profiles = [];
+let activeProfileId = null;
+let profileActiveId = null;
 
 // ── Базовые UI-утилиты ─────────────────────────────────────────────────────
 function renderTotal() {
@@ -783,6 +816,7 @@ function activateChat(chat) {
   renderChart();
   updateChatLayout();
   if (activeView === 'memory') renderMemoryView();
+  if (activeView === 'profile') renderProfileView();
   // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
   if (chat.sid) {
     apiActivateSession(chat.sid).catch((err) => {
@@ -852,18 +886,27 @@ function updateChatLayout() {
   }
 }
 
-// ── Виды основной области: Чат / Память ────────────────────────────────────
+// ── Виды основной области: Чат / Память / Профиль ──────────────────────────
 function switchView(view) {
-  activeView = view === 'memory' ? 'memory' : 'chat';
+  activeView =
+    view === 'memory' ? 'memory' : view === 'profile' ? 'profile' : 'chat';
   const isMemory = activeView === 'memory';
-  if (viewTabChat) viewTabChat.classList.toggle('chat__view-tab--active', !isMemory);
+  const isProfile = activeView === 'profile';
+  if (viewTabChat) {
+    viewTabChat.classList.toggle('chat__view-tab--active', activeView === 'chat');
+  }
   if (viewTabMemory) {
     viewTabMemory.classList.toggle('chat__view-tab--active', isMemory);
   }
-  if (chatMain) chatMain.hidden = isMemory;
+  if (viewTabProfile) {
+    viewTabProfile.classList.toggle('chat__view-tab--active', isProfile);
+  }
+  if (chatMain) chatMain.hidden = isMemory || isProfile;
   if (memoryView) memoryView.hidden = !isMemory;
+  if (profileView) profileView.hidden = !isProfile;
   updateChatLayout();
   if (isMemory) renderMemoryView();
+  if (isProfile) renderProfileView();
 }
 
 function activeMemoryStore(chat) {
@@ -1045,6 +1088,251 @@ async function syncMemory(chat) {
   } catch (err) {
     logClient('receive', `PUT /api/sessions/${chat.sid}/memory — ошибка`, err.message);
   }
+}
+
+// ── Профили пользователя (глобальная сущность) ─────────────────────────────
+function activeProfile() {
+  return profiles.find((p) => p.id === activeProfileId) || null;
+}
+
+function normalizeProfileFields(fields) {
+  const out = {};
+  for (const { key } of PROFILE_FIELDS) {
+    out[key] = fields && typeof fields[key] === 'string' ? fields[key] : '';
+  }
+  return out;
+}
+
+function activeProfileTab() {
+  return profiles.find((p) => p.id === profileActiveId) || profiles[0] || null;
+}
+
+function renderProfileView() {
+  if (!profileView || !profileTabList || !profileEditor) return;
+  profileTabList.innerHTML = '';
+  for (const profile of profiles) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className =
+      'memory__tab' + (activeProfileTab() === profile ? ' memory__tab--active' : '');
+    tab.title = profile.id === activeProfileId
+      ? `${profile.name} (текущий)`
+      : profile.name;
+    if (profile.id === activeProfileId) {
+      const check = document.createElement('span');
+      check.className = 'profile__tab-check';
+      check.title = 'Текущий профиль';
+      check.innerHTML = CHECK_ICON_SVG;
+      tab.appendChild(check);
+    }
+    const name = document.createElement('span');
+    name.className = 'memory__tab-name';
+    name.textContent = profile.name;
+    const close = document.createElement('span');
+    close.className = 'memory__tab-close';
+    close.textContent = '×';
+    close.title = 'Удалить профиль';
+    close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteProfile(profile.id);
+    });
+    tab.append(name, close);
+    tab.addEventListener('click', () => {
+      profileActiveId = profile.id;
+      renderProfileView();
+    });
+    profileTabList.appendChild(tab);
+  }
+  renderProfileEditor(activeProfileTab());
+}
+
+function renderProfileEditor(profile) {
+  profileEditor.innerHTML = '';
+  if (!profile) {
+    const empty = document.createElement('div');
+    empty.className = 'memory__empty';
+    empty.textContent = 'Создайте профиль: укажите название и нажмите «+».';
+    profileEditor.appendChild(empty);
+    return;
+  }
+
+  const form = document.createElement('div');
+  form.className = 'profile__form';
+
+  const inputs = {};
+  for (const { key, label, placeholder } of PROFILE_FIELDS) {
+    const field = document.createElement('label');
+    field.className = 'profile__field';
+    const labelEl = document.createElement('span');
+    labelEl.className = 'profile__label';
+    labelEl.textContent = label;
+    const inputEl = document.createElement('input');
+    inputEl.type = 'text';
+    inputEl.className = 'profile__input';
+    inputEl.placeholder = placeholder;
+    inputEl.value = profile.fields[key] || '';
+    inputs[key] = inputEl;
+    field.append(labelEl, inputEl);
+    form.appendChild(field);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'profile__actions';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'memory__save';
+  saveBtn.textContent = 'Сохранить';
+  saveBtn.addEventListener('click', () => saveProfile(profile.id, inputs));
+  const currentBtn = document.createElement('button');
+  currentBtn.type = 'button';
+  currentBtn.className =
+    'profile__current' + (profile.id === activeProfileId ? ' profile__current--active' : '');
+  currentBtn.textContent =
+    profile.id === activeProfileId ? 'Текущий профиль' : 'Установить текущим';
+  currentBtn.addEventListener('click', () => setCurrentProfile(profile.id, inputs));
+  const hint = document.createElement('span');
+  hint.className = 'profile__hint';
+  actions.append(saveBtn, currentBtn, hint);
+  form.appendChild(actions);
+
+  profileEditor.appendChild(form);
+}
+
+function readProfileInputs(profile, inputs) {
+  const fields = {};
+  let complete = true;
+  for (const { key } of PROFILE_FIELDS) {
+    const value = (inputs[key].value || '').trim();
+    fields[key] = value;
+    inputs[key].classList.toggle('profile__input--invalid', !value);
+    if (!value) complete = false;
+  }
+  if (!(profile.name || '').trim()) complete = false;
+  return { fields, complete };
+}
+
+function saveProfile(profileId, inputs) {
+  const profile = profiles.find((p) => p.id === profileId);
+  if (!profile) return;
+  const hint = profileEditor.querySelector('.profile__hint');
+  const { fields, complete } = readProfileInputs(profile, inputs);
+  if (!complete) {
+    if (hint) hint.textContent = 'Заполните все поля профиля.';
+    return;
+  }
+  profile.fields = fields;
+  if (hint) hint.textContent = 'Профиль сохранён.';
+  syncProfiles();
+}
+
+function setCurrentProfile(profileId, inputs) {
+  const profile = profiles.find((p) => p.id === profileId);
+  if (!profile) return;
+  const hint = profileEditor.querySelector('.profile__hint');
+  const { fields, complete } = readProfileInputs(profile, inputs);
+  if (!complete) {
+    if (hint) hint.textContent = 'Заполните все поля профиля.';
+    return;
+  }
+  profile.fields = fields;
+  activeProfileId = profileId;
+  syncProfiles();
+  renderProfileView();
+}
+
+function createProfile() {
+  const name =
+    (profileNewName ? profileNewName.value.trim() : '') ||
+    `Профиль ${profiles.length + 1}`;
+  const profile = {
+    id: `prf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name,
+    fields: normalizeProfileFields(null)
+  };
+  profiles.push(profile);
+  profileActiveId = profile.id;
+  if (profileNewName) profileNewName.value = '';
+  syncProfiles();
+  renderProfileView();
+  if (profileNewName) profileNewName.focus();
+}
+
+function deleteProfile(profileId) {
+  profiles = profiles.filter((p) => p.id !== profileId);
+  if (activeProfileId === profileId) activeProfileId = null;
+  if (profileActiveId === profileId) {
+    profileActiveId = profiles.length ? profiles[0].id : null;
+  }
+  syncProfiles();
+  renderProfileView();
+}
+
+async function syncProfiles() {
+  try {
+    const payload = { profiles, active_id: activeProfileId };
+    logClient('send', 'PUT /api/profiles', payload);
+    const res = await fetch('/api/profiles', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Ошибка ${res.status}`);
+    }
+    logClient('receive', `PUT /api/profiles → ${res.status}`);
+  } catch (err) {
+    logClient('receive', 'PUT /api/profiles — ошибка', err.message);
+  }
+}
+
+async function loadProfiles() {
+  try {
+    logClient('send', 'GET /api/profiles');
+    const res = await fetch('/api/profiles');
+    if (!res.ok) throw new Error(`Ошибка ${res.status}`);
+    const data = await res.json();
+    profiles = (Array.isArray(data.profiles) ? data.profiles : [])
+      .filter((p) => p && typeof p.id === 'string')
+      .map((p) => ({
+        id: p.id,
+        name: typeof p.name === 'string' ? p.name : '',
+        fields: normalizeProfileFields(p.fields)
+      }));
+    activeProfileId = typeof data.active_id === 'string' ? data.active_id : null;
+    logClient('receive', `GET /api/profiles → ${profiles.length}`, data);
+  } catch (err) {
+    logClient('receive', 'GET /api/profiles — ошибка', err.message);
+  }
+}
+
+// Уведомление о необходимости профиля (вместо отправки в LLM).
+function renderProfileRequired(chat, text) {
+  const el = createMessageEl('assistant', '');
+  el.classList.remove('message--empty');
+  el.classList.add('message--profile-required');
+  const content = el.querySelector('.message__content');
+  content.textContent = '';
+
+  const icon = document.createElement('div');
+  icon.className = 'message__limit-icon';
+  icon.textContent = '⚠';
+  const msg = document.createElement('div');
+  msg.className = 'message__limit-text';
+  msg.textContent = text;
+  const actions = document.createElement('div');
+  actions.className = 'message__limit-actions';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'message__limit-btn';
+  btn.textContent = 'Открыть профиль';
+  btn.addEventListener('click', () => switchView('profile'));
+
+  actions.appendChild(btn);
+  content.append(icon, msg, actions);
+  chat.messagesEl.appendChild(el);
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
 }
 
 function renderFactsPanel(chat) {
@@ -1428,7 +1716,9 @@ async function streamAssistant(chat, qaEl) {
 
     if (!res.ok || !res.body) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Ошибка ${res.status}`);
+      const error = new Error(data.error || `Ошибка ${res.status}`);
+      error.code = data.code || null;
+      throw error;
     }
 
     for await (const chunk of parseSSE(res)) {
@@ -1483,12 +1773,15 @@ async function streamAssistant(chat, qaEl) {
     removeWaiter(assistantContent);
     if (err.code === 'context_length_exceeded') {
       renderContextLimit(chat, assistantEl, err.message);
+    } else if (err.code === 'profile_required') {
+      qaEl.remove();
+      renderProfileRequired(chat, err.message);
     } else {
       setBubbleText(chat, assistantEl, `Ошибка: ${err.message}`);
       assistantEl.classList.add('message--error');
     }
     if (chat.history[chat.history.length - 1].role === 'user') chat.history.pop();
-    renderQaStats(qaEl, formatMetaLine(null));
+    if (err.code !== 'profile_required') renderQaStats(qaEl, formatMetaLine(null));
   } finally {
     chat.busy = false;
     updateSendButton();
@@ -2010,6 +2303,13 @@ form.addEventListener('submit', async (e) => {
     return;
   }
 
+  // Профиль обязателен для обычных чатов — любое сообщение без него
+  // блокируется (данные профиля идут в системный промпт).
+  if (chat.kind === 'chat' && !activeProfile()) {
+    renderProfileRequired(chat, 'Необходимо создать и установить профиль.');
+    return;
+  }
+
   input.value = '';
   autoResize();
   input.focus();
@@ -2179,6 +2479,23 @@ if (memoryNewName) {
   });
 }
 
+if (viewTabProfile) {
+  viewTabProfile.addEventListener('click', () => switchView('profile'));
+}
+
+if (profileAdd) {
+  profileAdd.addEventListener('click', createProfile);
+}
+
+if (profileNewName) {
+  profileNewName.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      createProfile();
+    }
+  });
+}
+
 if (chartColorToggle) {
   chartColorToggle.checked = chartColorMode;
   chartColorToggle.addEventListener('change', () => {
@@ -2261,6 +2578,7 @@ autoResize();
 renderTotal();
 applyChartCollapsed();
 renderChart();
+if (viewTabProfileIcon) viewTabProfileIcon.innerHTML = PROFILE_ICON_SVG;
 loadModels();
 
 async function restoreSessions() {
@@ -2320,6 +2638,8 @@ function sessionTitle(session) {
 (async () => {
   let restoredSessions = [];
   let activeId = null;
+  // Профили пользователя — до восстановления чатов (от них зависит отправка).
+  await loadProfiles();
   try {
     const restored = await restoreSessions();
     restoredSessions = restored.sessions;

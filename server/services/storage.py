@@ -19,6 +19,7 @@ from .chat_service import (
     ChatService,
     MemoryStore,
     MessageRecord,
+    Profile,
     RequestRecord,
     SessionKind,
 )
@@ -75,6 +76,13 @@ CREATE TABLE IF NOT EXISTS session_facts (
 CREATE TABLE IF NOT EXISTS session_memory (
     session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     stores      TEXT NOT NULL DEFAULT '[]',
+    updated_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS profiles (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    fields      TEXT NOT NULL DEFAULT '{}',
     updated_at  REAL NOT NULL
 );
 
@@ -301,6 +309,58 @@ class SessionStore:
             (session_id, json.dumps(persistent, ensure_ascii=False), time.time()),
         )
         self._conn.commit()
+
+    def save_profiles(self, profiles: list[Profile], active_id: Optional[str]) -> None:
+        """Перезаписывает все профили пользователя (полный синк).
+
+        Помимо самих профилей сохраняется идентификатор активного профиля
+        (или ключ очищается, если активного нет).
+
+        Args:
+            profiles: полный список профилей.
+            active_id: идентификатор активного профиля (или ``None``).
+        """
+        with self._conn:
+            self._conn.execute("DELETE FROM profiles")
+            for profile in profiles:
+                self._conn.execute(
+                    "INSERT INTO profiles (id, name, fields, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        profile.id,
+                        profile.name,
+                        json.dumps(profile.to_dict()["fields"], ensure_ascii=False),
+                        time.time(),
+                    ),
+                )
+            if active_id:
+                self._conn.execute(
+                    "INSERT INTO app_state (key, value) VALUES ('active_profile', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (active_id,),
+                )
+            else:
+                self._conn.execute("DELETE FROM app_state WHERE key = 'active_profile'")
+
+    def load_profiles(self) -> list[Profile]:
+        """Загружает все профили пользователя из БД.
+
+        Returns:
+            Список :class:`Profile` в порядке сохранения.
+        """
+        rows = self._conn.execute(
+            "SELECT id, name, fields FROM profiles ORDER BY updated_at, id"
+        ).fetchall()
+        return [
+            Profile.from_dict(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "fields": json.loads(row["fields"] or "{}"),
+                }
+            )
+            for row in rows
+        ]
 
     def save_history(self, session_id: str, records: list[MessageRecord]) -> None:
         """Перезаписывает историю сессии целиком (для снапшота при ветвлении).

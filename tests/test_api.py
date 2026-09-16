@@ -3,6 +3,7 @@
 import json
 
 from server.services.storage import SessionStore
+from tests.conftest import seed_test_profile, strip_profile
 
 
 def parse_sse(text: str) -> list[dict]:
@@ -160,6 +161,7 @@ async def _error_app(monkeypatch, status, error_text):
     )
     application.state.opencode_session_id = "s"
     application.state.registry = SessionRegistry(config.get_settings())
+    seed_test_profile(application.state.registry)
     return application
 
 
@@ -384,6 +386,7 @@ async def test_restart_restores_full_history(tmp_path, monkeypatch):
             store=SessionStore(db),
         )
         application.state.registry.restore()
+        seed_test_profile(application.state.registry)
         return application, transport
 
     # ── «сеанс 1»: создаём чат и отправляем сообщение
@@ -398,7 +401,9 @@ async def test_restart_restores_full_history(tmp_path, monkeypatch):
         assert parse_sse(r.text)[-1]["type"] == "done"
         # первое сообщение стало системным промптом: первый запрос уходит как [system]
         first_body = json.loads(transport1.requests[-1].content)
-        assert first_body["messages"] == [{"role": "system", "content": "первый вопрос"}]
+        assert strip_profile(first_body["messages"]) == [
+            {"role": "system", "content": "первый вопрос"}
+        ]
         # сессия запомнила модель обращения; открытая вкладка отмечена как активная
         assert (await c1.post(f"/api/sessions/{sid}/activate")).status_code == 204
         lst1 = (await c1.get("/api/sessions")).json()
@@ -431,12 +436,13 @@ async def test_restart_restores_full_history(tmp_path, monkeypatch):
         r = await c2.post(f"/api/sessions/{sid}/messages", json={"content": "второй вопрос"})
         assert parse_sse(r.text)[-1]["type"] == "done"
         second_body = json.loads(transport2.requests[-1].content)
-        assert [m["content"] for m in second_body["messages"]] == [
+        second_msgs = strip_profile(second_body["messages"])
+        assert [m["content"] for m in second_msgs] == [
             "первый вопрос",
             "Ответ",
             "второй вопрос",
         ]
-        assert [m["role"] for m in second_body["messages"]] == [
+        assert [m["role"] for m in second_msgs] == [
             "system",
             "assistant",
             "user",
@@ -492,7 +498,7 @@ async def test_context_summarization_flow(app, client):
         "Ответ", "вопрос 1", "Ответ", "вопрос 2", "Ответ",
     ]
     # основной запрос: [системный сид] + [саммари-рамка] + вербатим-хвост
-    main_msgs = main_body["messages"]
+    main_msgs = strip_profile(main_body["messages"])
     assert main_msgs[0] == {"role": "system", "content": "вопрос 0"}
     assert "Саммари начала диалога" in main_msgs[1]["content"]
     assert "Саммари 1:" in main_msgs[1]["content"]
@@ -548,6 +554,7 @@ async def test_restart_restores_summary_state(tmp_path, monkeypatch):
             config.get_settings(), store=SessionStore(db)
         )
         application.state.registry.restore()
+        seed_test_profile(application.state.registry)
         return application, transport
 
     app1, _ = build()
@@ -610,10 +617,11 @@ async def test_sliding_window_context(app, client):
     assert parse_sse(r.text)[-1]["type"] == "done"
     body = json.loads(transport.requests[-1].content)
     # сид (обмен №1) выпал из окна; уходят последние 3 обмена + новое
-    assert [m["content"] for m in body["messages"]] == [
+    body_msgs = strip_profile(body["messages"])
+    assert [m["content"] for m in body_msgs] == [
         "вопрос 2", "Ответ", "вопрос 3", "Ответ", "вопрос 4", "Ответ", "вопрос 5",
     ]
-    assert all(m["role"] != "system" for m in body["messages"])
+    assert all(m["role"] != "system" for m in body_msgs)
 
 
 async def test_facts_strategy_flow_and_restart(tmp_path, monkeypatch):
@@ -659,6 +667,7 @@ async def test_facts_strategy_flow_and_restart(tmp_path, monkeypatch):
             config.get_settings(), store=SessionStore(db)
         )
         application.state.registry.restore()
+        seed_test_profile(application.state.registry)
         return application, transport
 
     settings = {"context_strategy": {"strategy": "facts", "n": 5, "k": 2}}
@@ -773,8 +782,9 @@ async def test_memory_sync_and_injection(app, client):
     transport = app.state.mock_transport
     await client.post(f"/api/sessions/{sid}/messages", json={"content": "вопрос"})
     body = json.loads(transport.requests[-1].content)
-    memory_msg = body["messages"][1]
-    assert body["messages"][0]["role"] == "system"
+    msgs = strip_profile(body["messages"])
+    memory_msg = msgs[1]
+    assert msgs[0]["role"] == "system"
     assert "[Память чата]" in memory_msg["content"]
     assert "Имя: Иван" in memory_msg["content"]
     assert "Тема: API" in memory_msg["content"]
@@ -856,3 +866,145 @@ async def test_branch_copies_memory(app, client):
     assert r.status_code == 201
     state = (await client.get(f"/api/sessions/{r.json()['id']}")).json()
     assert [s["name"] for s in state["memory"]] == ["Профиль", "Черновик"]
+
+
+# ── Профили пользователя (глобальная сущность) ──────────────────────────────
+
+PROFILE_PAYLOAD = {
+    "profiles": [
+        {
+            "id": "prf-1",
+            "name": "Основной",
+            "fields": {
+                "address": "Иван",
+                "style": "кратко",
+                "language": "русский",
+                "format": "текст",
+                "limit": "5 предложений",
+            },
+        }
+    ],
+    "active_id": "prf-1",
+}
+
+
+async def test_profiles_sync_and_list(client):
+    # снимаем профиль тестовой фикстуры
+    await client.put("/api/profiles", json={"profiles": [], "active_id": None})
+    r = await client.get("/api/profiles")
+    assert r.status_code == 200
+    assert r.json() == {"profiles": [], "active_id": None}
+
+    r = await client.put("/api/profiles", json=PROFILE_PAYLOAD)
+    assert r.status_code == 200
+    data = r.json()
+    assert [p["name"] for p in data["profiles"]] == ["Основной"]
+    assert data["active_id"] == "prf-1"
+    assert data["profiles"][0]["fields"]["address"] == "Иван"
+
+    assert (await client.get("/api/profiles")).json()["active_id"] == "prf-1"
+
+
+async def test_incomplete_profile_is_dropped(client):
+    """Профиль без заполненных полей не сохраняется; активный снимается."""
+    r = await client.put("/api/profiles", json={
+        "profiles": [
+            {"id": "a", "name": "Пустой", "fields": {"address": "Иван"}},
+            {"id": "b", "name": "Полный", "fields": {
+                "address": "И", "style": "с", "language": "р",
+                "format": "т", "limit": "о",
+            }},
+        ],
+        "active_id": "a",
+    })
+    data = r.json()
+    assert [p["id"] for p in data["profiles"]] == ["b"]
+    assert data["active_id"] is None
+
+
+async def test_message_blocked_without_profile(app, client):
+    # снимаем профиль тестовой фикстуры
+    await client.put("/api/profiles", json={"profiles": [], "active_id": None})
+    sid = (await client.post("/api/sessions", json={})).json()["id"]
+    r = await client.post(f"/api/sessions/{sid}/messages", json={"content": "привет"})
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "profile_required"
+    assert body["error"] == "Необходимо создать и установить профиль."
+    # сообщение в историю не попало
+    state = (await client.get(f"/api/sessions/{sid}")).json()
+    assert state["history"] == []
+
+
+async def test_deleting_active_profile_blocks_again(app, client):
+    sid = (await client.post("/api/sessions", json={})).json()["id"]
+    r = await client.post(f"/api/sessions/{sid}/messages", json={"content": "первый"})
+    assert parse_sse(r.text)[-1]["type"] == "done"
+    # профиль снят — теперь любое сообщение блокируется
+    await client.put("/api/profiles", json={"profiles": [], "active_id": None})
+    r = await client.post(f"/api/sessions/{sid}/messages", json={"content": "второй"})
+    assert r.status_code == 400
+    assert r.json()["code"] == "profile_required"
+
+
+async def test_profile_injected_into_system_prompt(app, client):
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    r = await client.post(f"/api/sessions/{sid}/messages", json={"content": "вопрос"})
+    assert parse_sse(r.text)[-1]["type"] == "done"
+    body = json.loads(app.state.mock_transport.requests[-1].content)
+    profile_msg = body["messages"][0]
+    assert profile_msg["role"] == "system"
+    assert "следует профилю пользователя" in profile_msg["content"]
+    assert "[Профиль пользователя]" in profile_msg["content"]
+    assert "Как ко мне обращаться: Иван" in profile_msg["content"]
+    assert "Стиль общения: кратко и по делу" in profile_msg["content"]
+
+
+async def test_summary_chat_not_blocked_without_profile(app, client):
+    await client.put("/api/profiles", json={"profiles": [], "active_id": None})
+    sid = (await client.post("/api/sessions", json={"kind": "summary"})).json()["id"]
+    r = await client.post(f"/api/sessions/{sid}/messages", json={"content": "итоги"})
+    assert parse_sse(r.text)[-1]["type"] == "done"
+
+
+async def test_profiles_persist_after_restart(tmp_path, monkeypatch):
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import MockTransport, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+    db = str(tmp_path / "chats.db")
+
+    def build():
+        application = create_app()
+        transport = MockTransport(make_chat_chunks(content="Ответ", usage=USAGE))
+        application.state.http_client = httpx.AsyncClient(transport=transport)
+        application.state.opencode_session_id = "s"
+        application.state.registry = SessionRegistry(
+            config.get_settings(), store=SessionStore(db)
+        )
+        application.state.registry.restore()
+        return application
+
+    app1 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://t") as c1:
+        assert (await c1.put("/api/profiles", json=PROFILE_PAYLOAD)).status_code == 200
+    await app1.state.http_client.aclose()
+
+    app2 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://t") as c2:
+        data = (await c2.get("/api/profiles")).json()
+        assert [p["name"] for p in data["profiles"]] == ["Основной"]
+        assert data["active_id"] == "prf-1"
+        # после рестарта профиль подставляется (запрос не блокируется)
+        sid = (await c2.post("/api/sessions", json={})).json()["id"]
+        r = await c2.post(f"/api/sessions/{sid}/messages", json={"content": "вопрос"})
+        assert parse_sse(r.text)[-1]["type"] == "done"
+    await app2.state.http_client.aclose()

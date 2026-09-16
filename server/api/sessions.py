@@ -7,7 +7,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers import UnsupportedModelError, resolve_provider
 from ..providers.base import ProviderError
@@ -343,6 +343,29 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
     opencode_session_id = request.app.state.opencode_session_id
     spec = _resolve_spec(registry, session, body.model, opencode_session_id)
     first_message = not session.history
+
+    # Профиль пользователя (только обычные чаты): без активного профиля
+    # отправка блокируется; с профилем его данные идут в системный промпт.
+    profile_block = (
+        registry.active_profile_block()
+        if session.kind == SessionKind.CHAT
+        else None
+    )
+    if session.kind == SessionKind.CHAT and profile_block is None:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Необходимо создать и установить профиль.",
+                "code": "profile_required",
+            },
+        )
+    extra_system = profile_block
+    if body.system_prompt:
+        extra_system = (
+            f"{profile_block}\n\n{body.system_prompt}"
+            if profile_block
+            else body.system_prompt
+        )
     # Модель и «привязываемые» параметры (temperature/top_p/top_k) фиксируются
     # первым сообщением чата; далее изменения игнорируются.
     if body.model and first_message:
@@ -404,7 +427,7 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
                 runner,
                 spec,
                 gen_settings,
-                extra_system=body.system_prompt,
+                extra_system=extra_system,
                 summary_items=summary_items,
             ):
                 if event.get("type") == "done":

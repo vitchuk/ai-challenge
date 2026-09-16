@@ -11,6 +11,41 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from server.main import create_app
+from server.services import Profile
+from server.services.chat_service import PROFILE_MESSAGE_PREFIX
+
+
+#: Поля тестового профиля, активируемого в фикстуре ``app`` (иначе обычные
+#: чаты блокируются требованием «профиль обязателен»).
+TEST_PROFILE_FIELDS = {
+    "address": "Иван",
+    "style": "кратко и по делу",
+    "language": "русский",
+    "format": "структурированный текст",
+    "limit": "не более 5 предложений",
+}
+
+
+def seed_test_profile(registry) -> None:
+    """Создаёт и делаёт активным тестовый профиль в реестре."""
+    profile = Profile(id="prf-test", name="Тестовый", fields=dict(TEST_PROFILE_FIELDS))
+    registry.replace_profiles([profile], profile.id)
+
+
+def strip_profile(messages: list[dict]) -> list[dict]:
+    """Убирает ведущее служебное system-сообщение профиля из списка.
+
+    Используется в ассертах, чтобы проверять прочие сообщения запроса
+    независимо от вставленного блока профиля.
+    """
+    if (
+        messages
+        and messages[0].get("role") == "system"
+        and PROFILE_MESSAGE_PREFIX in messages[0].get("content", "")
+    ):
+        return messages[1:]
+    return messages
+
 
 
 class FakeStream(httpx.AsyncByteStream):
@@ -91,6 +126,7 @@ async def app(monkeypatch) -> FastAPI:
     application.state.mock_transport = transport
     application.state.opencode_session_id = "test-session"
     application.state.registry = SessionRegistry(config.get_settings())
+    seed_test_profile(application.state.registry)
     yield application
     await application.state.http_client.aclose()
 
