@@ -45,6 +45,12 @@ const profileTabList = document.getElementById('profile-tab-list');
 const profileNewName = document.getElementById('profile-new-name');
 const profileAdd = document.getElementById('profile-add');
 const profileEditor = document.getElementById('profile-editor');
+const viewTabTasks = document.getElementById('view-tab-tasks');
+const tasksView = document.getElementById('tasks-view');
+const tasksTabList = document.getElementById('tasks-tab-list');
+const tasksAdd = document.getElementById('tasks-add');
+const taskMessages = document.getElementById('task-messages');
+const taskActions = document.getElementById('task-actions');
 const factsPanel = document.getElementById('facts-panel');
 const factsList = document.getElementById('facts-list');
 const factsEmpty = document.getElementById('facts-empty');
@@ -145,6 +151,59 @@ const FACTS_PANEL_WIDTH_KEY = 'pomogator2k:facts-panel-width';
 // Значения N/K по стратегиям (дефолты: саммаризация 5, sliding 10, facts 10).
 let strategyParams = { summarize: 5, sliding: 10, facts: 10 };
 
+// Вид основной области и выбранные внутренние вкладки — переживают перезагрузку.
+// Структура: {view: "chat|tasks|memory|profile", inner: {profile, task, memory:{sid: id}}}.
+const UI_STATE_KEY = 'pomogator2k:ui-state';
+let uiState = { view: 'chat', inner: {} };
+
+function loadUiState() {
+  try {
+    const raw = localStorage.getItem(UI_STATE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return;
+    uiState.view = typeof parsed.view === 'string' ? parsed.view : 'chat';
+    uiState.inner =
+      parsed.inner && typeof parsed.inner === 'object' ? parsed.inner : {};
+    if (!uiState.inner.memory || typeof uiState.inner.memory !== 'object') {
+      uiState.inner.memory = {};
+    }
+  } catch {
+    uiState = { view: 'chat', inner: {} };
+  }
+}
+
+function saveUiState() {
+  try {
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify(uiState));
+  } catch {
+    /* localStorage может быть недоступен */
+  }
+}
+
+function setMemoryActive(chat, storeId) {
+  if (!chat) return;
+  chat.memoryActiveId = storeId;
+  if (chat.sid) {
+    uiState.inner.memory = uiState.inner.memory || {};
+    uiState.inner.memory[chat.sid] = storeId;
+  }
+  saveUiState();
+}
+
+function setProfileActive(profileId) {
+  profileActiveId = profileId;
+  uiState.inner.profile = profileId;
+  saveUiState();
+}
+
+function setTaskActive(task) {
+  if (!task) return;
+  activeTaskId = task.id;
+  uiState.inner.task = task.sid || null;
+  saveUiState();
+}
+
 const STRATEGY_HINTS = {
   none: 'вся история в контексте',
   summarize: 'каждые {N} запросов сжимаются в саммари',
@@ -188,6 +247,26 @@ const PROFILE_FIELDS = [
   { key: 'limit', label: 'Ограничение ответа', placeholder: 'Например: не более 5 предложений' }
 ];
 
+// Подсказка текущего этапа задачи (протокол «Задачи»).
+function taskStageHint(task) {
+  switch (task.stage) {
+    case 'input':
+      return 'Опишите задачу — LLM составит план её выполнения.';
+    case 'plan_review':
+      return 'План составлен. Подтвердите его или попросите доработку.';
+    case 'mode_select':
+      return 'План подтверждён. Выберите способ выполнения.';
+    case 'step_review':
+      return `Шаг ${task.step_results.length} из ${task.steps.length} выполнен. Примите его или доработайте шаг.`;
+    case 'review':
+      return 'Задача выполнена. Одобрите результат или попросите доработку.';
+    case 'done':
+      return 'Задача выполнена и одобрена.';
+    default:
+      return '';
+  }
+}
+
 const chats = [];
 let activeChatId = null;
 let chatCounter = 0;
@@ -201,6 +280,10 @@ let memoryDbPersistent = false;
 let profiles = [];
 let activeProfileId = null;
 let profileActiveId = null;
+// Задачи (протокол этапов, глобальные): список и активная вкладка.
+let tasks = [];
+let activeTaskId = null;
+let taskCounter = 0;
 
 // ── Базовые UI-утилиты ─────────────────────────────────────────────────────
 function renderTotal() {
@@ -211,6 +294,11 @@ function computeTokensTotal() {
   let sum = 0;
   for (const chat of chats) {
     for (const r of chat.requests || []) {
+      sum += (r.prompt_tokens || 0) + (r.completion_tokens || 0);
+    }
+  }
+  for (const task of tasks) {
+    for (const r of task.requests || []) {
       sum += (r.prompt_tokens || 0) + (r.completion_tokens || 0);
     }
   }
@@ -800,6 +888,8 @@ function renderTabs() {
 
 function activateChat(chat) {
   activeChatId = chat.id;
+  // Задачи — глобальный вид: при выборе чата возвращаемся к «Чат».
+  if (activeView === 'tasks') switchView('chat');
   for (const c of chats) {
     c.messagesEl.hidden = c.id !== chat.id;
   }
@@ -866,6 +956,8 @@ function updateChatLayout() {
   if (viewTabMemory) viewTabMemory.hidden = !isChat;
   if (!isChat && activeView === 'memory') {
     activeView = 'chat';
+    uiState.view = 'chat';
+    saveUiState();
     if (viewTabChat) viewTabChat.classList.add('chat__view-tab--active');
     if (viewTabMemory) viewTabMemory.classList.remove('chat__view-tab--active');
     if (chatMain) chatMain.hidden = false;
@@ -886,14 +978,26 @@ function updateChatLayout() {
   }
 }
 
-// ── Виды основной области: Чат / Память / Профиль ──────────────────────────
+// ── Виды основной области: Чат / Задачи / Память / Профиль ─────────────────
 function switchView(view) {
   activeView =
-    view === 'memory' ? 'memory' : view === 'profile' ? 'profile' : 'chat';
+    view === 'memory'
+      ? 'memory'
+      : view === 'profile'
+        ? 'profile'
+        : view === 'tasks'
+          ? 'tasks'
+          : 'chat';
   const isMemory = activeView === 'memory';
   const isProfile = activeView === 'profile';
+  const isTasks = activeView === 'tasks';
+  uiState.view = activeView;
+  saveUiState();
   if (viewTabChat) {
     viewTabChat.classList.toggle('chat__view-tab--active', activeView === 'chat');
+  }
+  if (viewTabTasks) {
+    viewTabTasks.classList.toggle('chat__view-tab--active', isTasks);
   }
   if (viewTabMemory) {
     viewTabMemory.classList.toggle('chat__view-tab--active', isMemory);
@@ -901,12 +1005,14 @@ function switchView(view) {
   if (viewTabProfile) {
     viewTabProfile.classList.toggle('chat__view-tab--active', isProfile);
   }
-  if (chatMain) chatMain.hidden = isMemory || isProfile;
+  if (chatMain) chatMain.hidden = isMemory || isProfile || isTasks;
   if (memoryView) memoryView.hidden = !isMemory;
   if (profileView) profileView.hidden = !isProfile;
+  if (tasksView) tasksView.hidden = !isTasks;
   updateChatLayout();
   if (isMemory) renderMemoryView();
   if (isProfile) renderProfileView();
+  if (isTasks) renderTasksView();
 }
 
 function activeMemoryStore(chat) {
@@ -944,7 +1050,7 @@ function renderMemoryView() {
     });
     tab.append(name, close);
     tab.addEventListener('click', () => {
-      chat.memoryActiveId = store.id;
+      setMemoryActive(chat, store.id);
       renderMemoryView();
     });
     memoryTabList.appendChild(tab);
@@ -1033,7 +1139,7 @@ function createMemoryStore() {
     items: []
   };
   chat.memoryStores.push(store);
-  chat.memoryActiveId = store.id;
+  setMemoryActive(chat, store.id);
   if (memoryNewName) memoryNewName.value = '';
   // Кнопка БД сбрасывается — следующая вкладка по умолчанию неперсистентна.
   memoryDbPersistent = false;
@@ -1044,9 +1150,11 @@ function createMemoryStore() {
 
 function deleteMemoryStore(chat, storeId) {
   if (!chat || !Array.isArray(chat.memoryStores)) return;
+  const store = chat.memoryStores.find((s) => s.id === storeId);
+  if (store && !confirm(`Удалить вкладку памяти «${store.name}»?`)) return;
   chat.memoryStores = chat.memoryStores.filter((s) => s.id !== storeId);
   if (chat.memoryActiveId === storeId) {
-    chat.memoryActiveId = chat.memoryStores.length ? chat.memoryStores[0].id : null;
+    setMemoryActive(chat, chat.memoryStores.length ? chat.memoryStores[0].id : null);
   }
   syncMemory(chat);
   renderMemoryView();
@@ -1138,7 +1246,7 @@ function renderProfileView() {
     });
     tab.append(name, close);
     tab.addEventListener('click', () => {
-      profileActiveId = profile.id;
+      setProfileActive(profile.id);
       renderProfileView();
     });
     profileTabList.appendChild(tab);
@@ -1250,7 +1358,7 @@ function createProfile() {
     fields: normalizeProfileFields(null)
   };
   profiles.push(profile);
-  profileActiveId = profile.id;
+  setProfileActive(profile.id);
   if (profileNewName) profileNewName.value = '';
   syncProfiles();
   renderProfileView();
@@ -1258,10 +1366,12 @@ function createProfile() {
 }
 
 function deleteProfile(profileId) {
+  const profile = profiles.find((p) => p.id === profileId);
+  if (profile && !confirm(`Удалить профиль «${profile.name}»?`)) return;
   profiles = profiles.filter((p) => p.id !== profileId);
   if (activeProfileId === profileId) activeProfileId = null;
   if (profileActiveId === profileId) {
-    profileActiveId = profiles.length ? profiles[0].id : null;
+    setProfileActive(profiles.length ? profiles[0].id : null);
   }
   syncProfiles();
   renderProfileView();
@@ -1333,6 +1443,483 @@ function renderProfileRequired(chat, text) {
   content.append(icon, msg, actions);
   chat.messagesEl.appendChild(el);
   chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+}
+
+// ── Задачи (строгий протокол этапов) ───────────────────────────────────────
+function activeTask() {
+  return tasks.find((t) => t.id === activeTaskId) || null;
+}
+
+function makeTaskMessagesEl() {
+  const el = document.createElement('div');
+  el.className = 'chat__messages';
+  el.hidden = true;
+  taskMessages.appendChild(el);
+  return el;
+}
+
+function renderTaskHistory(task) {
+  task.messagesEl.innerHTML = '';
+  let qaEl = null;
+  for (const m of task.history) {
+    if (m.role === 'user' || m.role === 'system') {
+      qaEl = document.createElement('div');
+      qaEl.className = 'qa';
+      task.messagesEl.appendChild(qaEl);
+      qaEl.appendChild(createMessageEl('user', m.content));
+    } else {
+      const el = createMessageEl('assistant', m.content);
+      (qaEl || task.messagesEl).appendChild(el);
+      if (m.meta) renderQaStats(qaEl || task.messagesEl, formatMetaLine(m.meta));
+      qaEl = null;
+    }
+  }
+  task.messagesEl.scrollTop = task.messagesEl.scrollHeight;
+}
+
+function addTaskQa(task, text) {
+  const qaEl = document.createElement('div');
+  qaEl.className = 'qa';
+  task.messagesEl.appendChild(qaEl);
+  qaEl.appendChild(createMessageEl('user', text));
+  task.messagesEl.scrollTop = task.messagesEl.scrollHeight;
+  return qaEl;
+}
+
+function addTaskNotice(task, text) {
+  const el = createMessageEl('assistant', text);
+  el.classList.add('message--error');
+  task.messagesEl.appendChild(el);
+  task.messagesEl.scrollTop = task.messagesEl.scrollHeight;
+}
+
+function renderTasksView() {
+  if (!tasksView || !tasksTabList) return;
+  tasksTabList.innerHTML = '';
+  for (const task of tasks) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className =
+      'memory__tab' + (activeTask() === task ? ' memory__tab--active' : '');
+    tab.title = task.title;
+    const name = document.createElement('span');
+    name.className = 'memory__tab-name';
+    name.textContent = task.title;
+    const close = document.createElement('span');
+    close.className = 'memory__tab-close';
+    close.textContent = '×';
+    close.title = 'Удалить задачу';
+    close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteTask(task);
+    });
+    tab.append(name, close);
+    tab.addEventListener('click', () => {
+      setTaskActive(task);
+      renderTasksView();
+    });
+    tasksTabList.appendChild(tab);
+  }
+  const task = activeTask();
+  for (const t of tasks) {
+    if (t.messagesEl) t.messagesEl.hidden = t !== task;
+  }
+  renderTaskActions(task);
+}
+
+function taskButton(text, cls, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `tasks__btn ${cls}`;
+  btn.textContent = text;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function taskFeedbackRow(task, placeholder, btnText, onSubmit, hidden = false) {
+  const row = document.createElement('div');
+  row.className = 'tasks__row tasks__feedback';
+  row.hidden = hidden;
+  const area = document.createElement('textarea');
+  area.className = 'tasks__input';
+  area.rows = 1;
+  area.placeholder = placeholder;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tasks__btn tasks__btn--primary';
+  btn.textContent = btnText;
+  const submit = () => {
+    const value = area.value.trim();
+    if (!value) return;
+    area.value = '';
+    onSubmit(value);
+  };
+  btn.addEventListener('click', submit);
+  area.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  });
+  row.append(area, btn);
+  return row;
+}
+
+function renderTaskActions(task) {
+  if (!taskActions) return;
+  taskActions.innerHTML = '';
+  if (!task) {
+    const empty = document.createElement('div');
+    empty.className = 'tasks__hint';
+    empty.textContent = 'Создайте задачу кнопкой «+».';
+    taskActions.appendChild(empty);
+    return;
+  }
+
+  const hint = document.createElement('div');
+  hint.className = 'tasks__hint';
+  hint.textContent = taskStageHint(task);
+  taskActions.appendChild(hint);
+
+  const toggleFeedback = () => {
+    const row = taskActions.querySelector('.tasks__feedback');
+    if (row) {
+      row.hidden = !row.hidden;
+      const area = row.querySelector('.tasks__input');
+      if (!row.hidden && area) area.focus();
+    }
+  };
+  const feedback = (placeholder, action = 'revise') =>
+    taskFeedbackRow(
+      task,
+      placeholder,
+      'Отправить замечания',
+      (text) => advanceTask(task, action, text),
+      true
+    );
+
+  if (task.stage === 'input') {
+    taskActions.appendChild(
+      taskFeedbackRow(task, 'Опишите задачу...', 'Отправить', (text) =>
+        advanceTask(task, 'describe', text)
+      )
+    );
+  } else if (task.stage === 'done') {
+    const done = document.createElement('div');
+    done.className = 'tasks__done';
+    const label = document.createElement('span');
+    label.textContent = 'Задача выполнена ✓';
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'tasks__btn tasks__btn--primary';
+    copy.textContent = 'Копировать ответ';
+    copy.addEventListener('click', () => copyToClipboard(task.result || ''));
+    done.append(label, copy);
+    taskActions.appendChild(done);
+  } else {
+    const row = document.createElement('div');
+    row.className = 'tasks__row';
+    if (task.stage === 'plan_review') {
+      row.append(
+        taskButton('Подтвердить план', 'tasks__btn--primary', () =>
+          taskActionJson(task, 'confirm')
+        ),
+        taskButton('Доработать', 'tasks__btn--ghost', toggleFeedback)
+      );
+      taskActions.append(row, feedback('Что изменить в плане...'));
+    } else if (task.stage === 'mode_select') {
+      row.append(
+        taskButton('Выполнить по шагам', 'tasks__btn--primary', () =>
+          advanceTask(task, 'start_steps')
+        ),
+        taskButton('Выполнить всё сразу', 'tasks__btn--ghost', () =>
+          advanceTask(task, 'run_all')
+        )
+      );
+      taskActions.appendChild(row);
+    } else if (task.stage === 'step_review') {
+      row.append(
+        taskButton('Принять шаг', 'tasks__btn--primary', () =>
+          confirmStepTask(task)
+        ),
+        taskButton('Доработать шаг', 'tasks__btn--ghost', toggleFeedback)
+      );
+      taskActions.append(row, feedback('Что исправить в шаге...', 'revise_step'));
+    } else if (task.stage === 'review') {
+      row.append(
+        taskButton('Одобрить', 'tasks__btn--primary', () =>
+          taskActionJson(task, 'approve')
+        ),
+        taskButton('Доработать', 'tasks__btn--ghost', toggleFeedback)
+      );
+      taskActions.append(row, feedback('Что доработать в результате...'));
+    }
+  }
+
+  if (task.busy) {
+    taskActions.querySelectorAll('button, textarea').forEach((el) => {
+      el.disabled = true;
+    });
+  }
+}
+
+async function createTask() {
+  const task = {
+    id: `task-${++taskCounter}`,
+    sid: null,
+    title: 'Новая задача',
+    stage: 'input',
+    plan: null,
+    result: null,
+    steps: [],
+    step_results: [],
+    history: [],
+    requests: [],
+    busy: false,
+    messagesEl: makeTaskMessagesEl()
+  };
+  tasks.push(task);
+  setTaskActive(task);
+  renderTasksView();
+  try {
+    const created = await apiCreateSession({ kind: 'task' });
+    task.sid = created.id;
+    setTaskActive(task);
+  } catch (err) {
+    addTaskNotice(task, `Ошибка создания задачи: ${err.message}`);
+  }
+  renderTasksView();
+}
+
+function makeTaskFromState(state) {
+  const task = {
+    id: `task-${++taskCounter}`,
+    sid: state.id,
+    title: state.title || 'Задача',
+    stage: state.stage || 'input',
+    plan: state.plan || null,
+    result: state.result || null,
+    steps: Array.isArray(state.steps) ? state.steps.map((s) => String(s)) : [],
+    step_results: Array.isArray(state.step_results)
+      ? state.step_results.map((s) => String(s))
+      : [],
+    history: Array.isArray(state.history)
+      ? state.history.map((m) => ({ role: m.role, content: m.content, meta: m.meta || null }))
+      : [],
+    requests: Array.isArray(state.requests) ? state.requests.map((r) => ({ ...r })) : [],
+    busy: false,
+    messagesEl: makeTaskMessagesEl()
+  };
+  renderTaskHistory(task);
+  return task;
+}
+
+async function loadTasks() {
+  try {
+    logClient('send', 'GET /api/tasks');
+    const res = await fetch('/api/tasks');
+    if (!res.ok) throw new Error(`Ошибка ${res.status}`);
+    const data = await res.json();
+    const list = Array.isArray(data.data) ? data.data : [];
+    for (const state of list) {
+      tasks.push(makeTaskFromState(state));
+    }
+    if (!activeTaskId && tasks.length) activeTaskId = tasks[tasks.length - 1].id;
+    logClient('receive', `GET /api/tasks → ${tasks.length}`, data);
+  } catch (err) {
+    logClient('receive', 'GET /api/tasks — ошибка', err.message);
+  }
+}
+
+async function deleteTask(task) {
+  if (!task || task.busy) return;
+  if (!confirm(`Удалить задачу «${task.title}»?`)) return;
+  const idx = tasks.indexOf(task);
+  if (task.messagesEl) task.messagesEl.remove();
+  tasks.splice(idx, 1);
+  if (task.sid) apiDeleteSession(task.sid).catch(() => {});
+  if (activeTaskId === task.id || !activeTask()) {
+    if (tasks.length) {
+      setTaskActive(tasks[tasks.length - 1]);
+    } else {
+      activeTaskId = null;
+      uiState.inner.task = null;
+      saveUiState();
+    }
+  }
+  renderTasksView();
+}
+
+async function advanceTask(task, action, content) {
+  if (!task || task.busy || !task.sid) return;
+  if (!activeProfile()) {
+    addTaskNotice(task, 'Необходимо создать и установить профиль.');
+    return;
+  }
+
+  let marker = null;
+  if (action === 'describe' || action === 'revise' || action === 'revise_step') {
+    if (!content) return;
+    marker = content;
+  } else if (action === 'run_all') {
+    marker = 'Выполни весь план.';
+  } else if (action === 'start_steps') {
+    marker = 'Выполни шаг 1.';
+  }
+  let qaEl = null;
+  if (marker !== null) {
+    task.history.push({ role: 'user', content: marker });
+    qaEl = addTaskQa(task, marker);
+  }
+  if (action === 'describe') {
+    task.title = content.replace(/\s+/g, ' ').trim().slice(0, 60) || 'Задача';
+    renderTasksView();
+  }
+
+  task.busy = true;
+  renderTaskActions(task);
+  await streamTaskAdvance(task, action, content, qaEl);
+  task.busy = false;
+  renderTasksView();
+}
+
+// Действия протокола без обращения к LLM (JSON-ответ с прогрессом).
+async function taskActionJson(task, action) {
+  if (!task || task.busy || !task.sid) return;
+  try {
+    logClient('send', `POST /api/tasks/${task.sid}/advance`, { action });
+    const res = await fetch(`/api/tasks/${task.sid}/advance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Ошибка ${res.status}`);
+    }
+    const data = await res.json();
+    logClient('receive', `POST /api/tasks/${task.sid}/advance → ${res.status}`, data);
+    applyTaskProgress(task, data);
+  } catch (err) {
+    addTaskNotice(task, `Ошибка: ${err.message}`);
+  }
+  renderTasksView();
+}
+
+// Принятие шага: если остались шаги — сразу выполняем следующий (SSE),
+// иначе финализируем задачу (JSON-переход в review со склейкой результатов).
+async function confirmStepTask(task) {
+  if (!task || task.busy || !task.sid) return;
+  const remaining = (task.steps || []).length - (task.step_results || []).length;
+  if (remaining <= 0) {
+    await taskActionJson(task, 'confirm_step');
+    return;
+  }
+  if (!activeProfile()) {
+    addTaskNotice(task, 'Необходимо создать и установить профиль.');
+    return;
+  }
+  const index = (task.step_results || []).length;
+  const marker = `Выполни шаг ${index + 1}.`;
+  task.history.push({ role: 'user', content: marker });
+  const qaEl = addTaskQa(task, marker);
+  task.busy = true;
+  renderTaskActions(task);
+  await streamTaskAdvance(task, 'confirm_step', null, qaEl);
+  task.busy = false;
+  renderTasksView();
+}
+
+// Синхронизирует этап и шаговый прогресс из ответа сервера.
+function applyTaskProgress(task, data) {
+  if (!data) return;
+  if (typeof data.stage === 'string') task.stage = data.stage;
+  if (Array.isArray(data.steps)) task.steps = data.steps;
+  if (Array.isArray(data.step_results)) task.step_results = data.step_results;
+  if (data.result !== undefined) task.result = data.result;
+}
+
+async function streamTaskAdvance(task, action, content, qaEl) {
+  const assistantEl = createMessageEl('assistant', '');
+  qaEl.appendChild(assistantEl);
+  const assistantContent = assistantEl.querySelector('.message__content');
+  showWaiter(assistantContent);
+  scrollChatToBottom(task);
+  let full = '';
+  let thinkingText = '';
+  let finalMeta = null;
+
+  const payload = { action };
+  if (content != null) payload.content = content;
+  if (action === 'describe') {
+    payload.model = currentModel();
+    payload.settings = collectSettings();
+  }
+
+  try {
+    logClient('send', `POST /api/tasks/${task.sid}/advance`, payload);
+    const res = await fetch(`/api/tasks/${task.sid}/advance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      const error = new Error(data.error || `Ошибка ${res.status}`);
+      error.code = data.code || null;
+      throw error;
+    }
+
+    for await (const chunk of parseSSE(res)) {
+      logClient('receive', `POST /api/tasks/${task.sid}/advance — событие`, chunk);
+      if (chunk.type === 'reasoning_start') {
+        createReasoning(assistantEl);
+        showWaiter(assistantContent);
+        scrollChatToBottom(task);
+      } else if (chunk.type === 'reasoning_end') {
+        thinkingText = chunk.content || '';
+        if (thinkingText) setReasoningText(assistantEl, thinkingText);
+        finishReasoning(assistantEl);
+        showWaiter(assistantContent);
+        scrollChatToBottom(task);
+      } else if (chunk.type === 'done') {
+        finalMeta = chunk.meta || null;
+        full = chunk.content || '';
+      } else if (chunk.type === 'request_log') {
+        handleTaskRequestLog(task, chunk.record);
+      } else if (chunk.type === 'stage') {
+        applyTaskProgress(task, chunk);
+      } else if (chunk.type === 'error') {
+        const error = new Error(chunk.error || 'Неизвестная ошибка сервера');
+        error.code = chunk.code || null;
+        throw error;
+      }
+    }
+
+    removeWaiter(assistantContent);
+    setBubbleText(task, assistantEl, full || emptyResponseText(finalMeta, null));
+    task.history.push({ role: 'assistant', content: full, meta: finalMeta });
+    if (action === 'describe' || action === 'revise') task.plan = full;
+    else if (action === 'run_all') task.result = full;
+    renderQaStats(qaEl, formatMetaLine(finalMeta));
+  } catch (err) {
+    removeWaiter(assistantContent);
+    setBubbleText(task, assistantEl, `Ошибка: ${err.message}`);
+    assistantEl.classList.add('message--error');
+    const last = task.history[task.history.length - 1];
+    if (last && last.role === 'user') task.history.pop();
+    renderQaStats(qaEl, formatMetaLine(null));
+  }
+}
+
+function handleTaskRequestLog(task, record) {
+  if (!task || !record) return;
+  task.requests.push(record);
+  const total = (record.prompt_tokens || 0) + (record.completion_tokens || 0);
+  if (total > 0) {
+    tokensBurned += total;
+    renderTotal();
+  }
 }
 
 function renderFactsPanel(chat) {
@@ -2496,6 +3083,14 @@ if (profileNewName) {
   });
 }
 
+if (viewTabTasks) {
+  viewTabTasks.addEventListener('click', () => switchView('tasks'));
+}
+
+if (tasksAdd) {
+  tasksAdd.addEventListener('click', createTask);
+}
+
 if (chartColorToggle) {
   chartColorToggle.checked = chartColorMode;
   chartColorToggle.addEventListener('change', () => {
@@ -2579,6 +3174,7 @@ renderTotal();
 applyChartCollapsed();
 renderChart();
 if (viewTabProfileIcon) viewTabProfileIcon.innerHTML = PROFILE_ICON_SVG;
+loadUiState();
 loadModels();
 
 async function restoreSessions() {
@@ -2635,11 +3231,37 @@ function sessionTitle(session) {
   return firstMsg ? firstMsg.content.replace(/\s+/g, ' ').trim() : 'Новый чат';
 }
 
+// Восстанавливает сохранённый вид и выбранные внутренние вкладки.
+function applySavedView() {
+  if (
+    uiState.inner.profile &&
+    profiles.some((p) => p.id === uiState.inner.profile)
+  ) {
+    profileActiveId = uiState.inner.profile;
+  }
+  const savedTask = tasks.find((t) => t.sid === uiState.inner.task);
+  if (savedTask) activeTaskId = savedTask.id;
+
+  const chat = getActiveChat();
+  const storeId =
+    chat && chat.sid && uiState.inner.memory
+      ? uiState.inner.memory[chat.sid]
+      : null;
+  if (chat && storeId && (chat.memoryStores || []).some((s) => s.id === storeId)) {
+    chat.memoryActiveId = storeId;
+  }
+
+  const known = ['chat', 'tasks', 'memory', 'profile'];
+  switchView(known.includes(uiState.view) ? uiState.view : 'chat');
+}
+
 (async () => {
   let restoredSessions = [];
   let activeId = null;
   // Профили пользователя — до восстановления чатов (от них зависит отправка).
   await loadProfiles();
+  // Задачи (протокол этапов) — тоже глобальные; восстанавливаем вкладки.
+  await loadTasks();
   try {
     const restored = await restoreSessions();
     restoredSessions = restored.sessions;
@@ -2651,6 +3273,7 @@ function sessionTitle(session) {
   if (restoredSessions.length === 0) {
     const initialChat = await createChat();
     activateChat(initialChat);
+    applySavedView();
     return;
   }
 
@@ -2676,4 +3299,5 @@ function sessionTitle(session) {
   computeTokensTotal();
   const activeChat = (activeId && chats.find((c) => c.sid === activeId)) || mostRecent || chats[0];
   activateChat(activeChat);
+  applySavedView();
 })();

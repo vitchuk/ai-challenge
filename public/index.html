@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Помогатор2К</title>
-  <link rel="stylesheet" href="style.css?v=17" />
+  <link rel="stylesheet" href="style.css?v=21" />
 </head>
 <body>
   <div class="app">
@@ -24,6 +24,9 @@
           type="button"
         >
           Чат
+        </button>
+        <button id="view-tab-tasks" class="chat__view-tab" type="button">
+          Задачи
         </button>
         <button id="view-tab-memory" class="chat__view-tab" type="button">
           Память
@@ -94,6 +97,24 @@
           </div>
         </div>
         <div id="memory-editor" class="memory__editor"></div>
+      </section>
+
+      <section id="tasks-view" class="chat__tasks" hidden>
+        <div id="tasks-tabs" class="memory__tabs tasks__tabs">
+          <div id="tasks-tab-list" class="memory__tab-list"></div>
+          <div class="memory__create">
+            <button
+              id="tasks-add"
+              class="memory__add"
+              type="button"
+              title="Создать задачу"
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div id="task-messages" class="chat__body"></div>
+        <div id="task-actions" class="tasks__actions"></div>
       </section>
 
       <section id="profile-view" class="chat__profile" hidden>
@@ -334,6 +355,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=17"></script>
+  <script src="app.js?v=21"></script>
 </body>
 </html>

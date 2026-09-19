@@ -230,6 +230,24 @@ class SessionRegistry:
             return
         self._store.save_memory(chat.id, chat.memory_stores)
 
+    def persist_task_state(self, chat: ChatService) -> None:
+        """Персистит состояние задачи (этап, план, результат).
+
+        Args:
+            chat: сессия-задача с заполненными ``task_stage``/``task_plan``/
+                ``task_result``.
+        """
+        if self._store is None or chat.kind != SessionKind.TASK:
+            return
+        self._store.save_task_state(
+            chat.id,
+            chat.task_stage or "input",
+            chat.task_plan,
+            chat.task_result,
+            chat.task_steps,
+            chat.task_step_results,
+        )
+
     def list_profiles(self) -> list[Profile]:
         """Возвращает список всех профилей пользователя."""
         return list(self._profiles.values())
