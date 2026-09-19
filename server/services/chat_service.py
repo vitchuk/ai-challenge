@@ -82,11 +82,51 @@ PROFILE_SYSTEM_PREFIX = (
     "пользователь об этом не попросил явно."
 )
 
+#: Системный промпт планировщика задач (шаг 2 протокола «Задачи»).
+TASK_PLANNER_SYSTEM_PROMPT = (
+    "Ты — планировщик задач. Составь чёткий пошаговый план выполнения задачи "
+    "пользователя. Если даны прежний план и/или замечания — обязательно учти "
+    "их и исправь план. Оформи план нумерованным списком шагов: один шаг — "
+    "одна строка, без вступлений и пояснений."
+)
+
+#: Системный промпт исполнителя задач (шаг 3 — выполнение всего плана).
+TASK_EXECUTOR_SYSTEM_PROMPT = (
+    "Ты — исполнитель задачи. Выполни задачу пользователя строго по "
+    "подтверждённому плану. Отвечай только результатом, без вступлений."
+)
+
+#: Системный промпт исполнителя одного шага (пошаговый режим).
+TASK_STEP_EXECUTOR_SYSTEM_PROMPT = (
+    "Ты — исполнитель задачи. Выполни ТОЛЬКО указанный шаг плана, не выполняя "
+    "остальные шаги. Опирайся на результаты уже выполненных шагов. Отвечай "
+    "только результатом этого шага, без вступлений."
+)
+
+#: Системный промпт переделки одного шага (доработка на этапе шага).
+TASK_STEP_REVISE_SYSTEM_PROMPT = (
+    "Ты — исполнитель задачи. Пользователь дал замечания к результату "
+    "указанного шага. Переделай ТОЛЬКО этот шаг с учётом замечаний, не "
+    "выполняя остальные шаги. Опирайся на результаты предыдущих шагов. "
+    "Отвечай только исправленным результатом этого шага, без вступлений."
+)
+
+#: Этапы задачи (машина состояний протокола «Задачи»).
+TASK_STAGES = (
+    "input",
+    "plan_review",
+    "mode_select",
+    "step_review",
+    "review",
+    "done",
+)
+
 
 class SessionKind(str, Enum):
     """Тип сессии (чата)."""
 
     CHAT = "chat"
+    TASK = "task"
     SUMMARY = "summary"
     EPHEMERAL = "ephemeral"
 
@@ -347,6 +387,13 @@ class ChatService:
         self.facts: list[str] = []
         # Память чата: именованные хранилища пар «ключ — значение».
         self.memory_stores: list[MemoryStore] = []
+        # Состояние задачи (протокол «Задачи»): этап, текущий план и результат.
+        self.task_stage: Optional[str] = "input" if kind == SessionKind.TASK else None
+        self.task_plan: Optional[str] = None
+        self.task_result: Optional[str] = None
+        # Пошаговый режим: разобранные шаги плана и результаты выполненных.
+        self.task_steps: list[str] = []
+        self.task_step_results: list[str] = []
         # Метаданные ответвлённого чата (снапшот): родитель и своё название.
         self.parent_id: Optional[str] = None
         self.title: Optional[str] = None
@@ -1001,6 +1048,7 @@ class ChatService:
         generation_settings: Optional[GenerationSettings] = None,
         extra_system: Optional[str] = None,
         summary_items: Optional[list[str]] = None,
+        messages: Optional[list[dict]] = None,
     ) -> AsyncIterator[dict]:
         """Выполняет стрим ответа и накапливает события для клиента.
 
@@ -1016,6 +1064,8 @@ class ChatService:
             extra_system: дополнительный системный промпт, вставляемый
                 перед остальными сообщениями (например, инструкция JSON-режима).
             summary_items: накопленные саммари (если включена саммаризация).
+            messages: готовый список сообщений запроса (протокол «Задачи»);
+                при передаче заменяет сборку по истории/стратегии.
 
         Yields:
             Словари событий: ``{"type": ...}``.
@@ -1023,15 +1073,19 @@ class ChatService:
         settings = generation_settings or self.settings
         self.busy = True
         start_time = time.time()
-        messages = self.build_request_messages(
-            summary_items=summary_items, extra_system=extra_system
+        request_messages = (
+            messages
+            if messages is not None
+            else self.build_request_messages(
+                summary_items=summary_items, extra_system=extra_system
+            )
         )
         full = ""
         usage = None
         finish_reason = None
 
         try:
-            async for event in runner.run(spec, messages, settings):
+            async for event in runner.run(spec, request_messages, settings):
                 if event.kind == "delta":
                     full += event.content
                 elif event.kind == "reasoning_start":

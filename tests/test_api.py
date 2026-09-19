@@ -1008,3 +1008,403 @@ async def test_profiles_persist_after_restart(tmp_path, monkeypatch):
         r = await c2.post(f"/api/sessions/{sid}/messages", json={"content": "вопрос"})
         assert parse_sse(r.text)[-1]["type"] == "done"
     await app2.state.http_client.aclose()
+
+
+# ── Задачи (протокол этапов) ────────────────────────────────────────────────
+
+async def test_task_lifecycle(app, client):
+    tid = (await client.post("/api/sessions", json={"kind": "task"})).json()["id"]
+
+    # шаг 1→2: описание задачи → план
+    r = await client.post(f"/api/tasks/{tid}/advance", json={
+        "action": "describe", "content": "Сделай отчёт",
+        "model": "opencode/glm-5.3",
+    })
+    events = parse_sse(r.text)
+    assert [e["type"] for e in events] == ["session", "request_log", "done", "stage"]
+    assert events[-1]["stage"] == "plan_review"
+    assert events[-2]["content"] == "Ответ"
+
+    task = (await client.get("/api/tasks")).json()["data"][0]
+    assert task["stage"] == "plan_review"
+    assert task["plan"] == "Ответ"
+    assert task["title"] == "Сделай отчёт"
+    assert task["model"] == "opencode/glm-5.3"
+    assert [m["role"] for m in task["history"]] == ["user", "assistant"]
+
+    # шаг 2→3: подтверждение плана → выбор режима (без LLM)
+    r = await client.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+    assert r.status_code == 200
+    assert r.json()["stage"] == "mode_select"
+
+    # режим «всё сразу» → выполнение
+    r = await client.post(f"/api/tasks/{tid}/advance", json={"action": "run_all"})
+    assert parse_sse(r.text)[-1]["stage"] == "review"
+    task = (await client.get("/api/tasks")).json()["data"][0]
+    assert task["stage"] == "review"
+    assert task["result"] == "Ответ"
+
+    # шаг 4: одобрение → done (без LLM)
+    r = await client.post(f"/api/tasks/{tid}/advance", json={"action": "approve"})
+    assert r.status_code == 200
+    assert r.json()["stage"] == "done"
+    task = (await client.get("/api/tasks")).json()["data"][0]
+    assert task["stage"] == "done"
+
+    # задачи не попадают в список обычных чатов
+    assert (await client.get("/api/sessions")).json()["data"] == []
+
+
+async def test_task_revise_loop(app, client):
+    tid = (await client.post("/api/sessions", json={"kind": "task"})).json()["id"]
+    await client.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Задача"})
+
+    # доработка плана остаётся на plan_review
+    r = await client.post(f"/api/tasks/{tid}/advance", json={"action": "revise", "content": "Доработай план"})
+    assert parse_sse(r.text)[-1]["stage"] == "plan_review"
+
+    # подтверждение → mode_select → выполнение → review, затем доработка → plan_review
+    await client.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+    await client.post(f"/api/tasks/{tid}/advance", json={"action": "run_all"})
+    r = await client.post(f"/api/tasks/{tid}/advance", json={"action": "revise", "content": "Переделай"})
+    assert parse_sse(r.text)[-1]["stage"] == "plan_review"
+    task = (await client.get("/api/tasks")).json()["data"][0]
+    assert task["stage"] == "plan_review"
+    # замечания и исправленный план в истории
+    assert task["history"][-2]["content"] == "Переделай"
+
+
+async def test_task_stage_validation(app, client):
+    tid = (await client.post("/api/sessions", json={"kind": "task"})).json()["id"]
+
+    # действия не по этапу → 409 с текущим этапом
+    r = await client.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+    assert r.status_code == 409
+    assert r.json()["stage"] == "input"
+    assert (await client.post(f"/api/tasks/{tid}/advance", json={"action": "approve"})).status_code == 409
+    # неизвестное действие → 400
+    assert (await client.post(f"/api/tasks/{tid}/advance", json={"action": "nope"})).status_code == 400
+    # пустой текст → 400
+    assert (await client.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "  "})).status_code == 400
+    # на этапе плана режимы выполнения ещё недоступны
+    tid2 = (await client.post("/api/sessions", json={"kind": "task"})).json()["id"]
+    await client.post(f"/api/tasks/{tid2}/advance", json={"action": "describe", "content": "Задача"})
+    assert (await client.post(f"/api/tasks/{tid2}/advance", json={"action": "run_all"})).status_code == 409
+    assert (await client.post(f"/api/tasks/{tid2}/advance", json={"action": "start_steps"})).status_code == 409
+    assert (await client.post(f"/api/tasks/{tid2}/advance", json={"action": "revise_step", "content": "x"})).status_code == 409
+    # run_step не существует — неизвестное действие
+    assert (await client.post(f"/api/tasks/{tid2}/advance", json={"action": "run_step"})).status_code == 400
+    # не задача → 400; нет задачи → 404
+    chat = (await client.post("/api/sessions", json={})).json()["id"]
+    assert (await client.post(f"/api/tasks/{chat}/advance", json={"action": "describe", "content": "x"})).status_code == 400
+    assert (await client.post("/api/tasks/nope/advance", json={"action": "describe", "content": "x"})).status_code == 404
+    # обычный чат нельзя вести через messages-эндпоинт задачи
+    assert (await client.post(f"/api/sessions/{tid}/messages", json={"content": "x"})).status_code == 400
+
+
+async def test_task_requires_profile(app, client):
+    await client.put("/api/profiles", json={"profiles": [], "active_id": None})
+    tid = (await client.post("/api/sessions", json={"kind": "task"})).json()["id"]
+    r = await client.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Задача"})
+    assert r.status_code == 400
+    assert r.json()["code"] == "profile_required"
+
+
+async def test_task_prompts_and_profile(app, client):
+    tid = (await client.post("/api/sessions", json={"kind": "task"})).json()["id"]
+    transport = app.state.mock_transport
+
+    await client.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Сделай X"})
+    planner = json.loads(transport.requests[-1].content)
+    planner_system = next(
+        m for m in planner["messages"] if "планировщик" in m.get("content", "")
+    )
+    # профиль активен и подмешан в системный промпт
+    assert "[Профиль пользователя]" in planner_system["content"]
+    assert any("Сделай X" in m.get("content", "") for m in planner["messages"])
+
+    # подтверждение режима не обращается к LLM; исполнитель — при run_all
+    await client.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+    await client.post(f"/api/tasks/{tid}/advance", json={"action": "run_all"})
+    executor = json.loads(transport.requests[-1].content)
+    assert any("исполнитель" in m.get("content", "") for m in executor["messages"])
+    # план из ответа планировщика уходит исполнителю
+    assert any("Ответ" in m.get("content", "") for m in executor["messages"])
+
+
+async def test_task_restart_resume(tmp_path, monkeypatch):
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import MockTransport, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+    db = str(tmp_path / "chats.db")
+
+    def build():
+        application = create_app()
+        transport = MockTransport(make_chat_chunks(content="Ответ", usage=USAGE))
+        application.state.http_client = httpx.AsyncClient(transport=transport)
+        application.state.opencode_session_id = "s"
+        application.state.registry = SessionRegistry(
+            config.get_settings(), store=SessionStore(db)
+        )
+        application.state.registry.restore()
+        seed_test_profile(application.state.registry)
+        return application
+
+    app1 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://t") as c1:
+        tid = (await c1.post("/api/sessions", json={"kind": "task"})).json()["id"]
+        r = await c1.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Задача"})
+        assert parse_sse(r.text)[-1]["stage"] == "plan_review"
+    await app1.state.http_client.aclose()
+
+    # после рестарта задача продолжается с того же этапа
+    app2 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://t") as c2:
+        data = (await c2.get("/api/tasks")).json()["data"]
+        assert len(data) == 1
+        assert data[0]["id"] == tid
+        assert data[0]["stage"] == "plan_review"
+        assert data[0]["plan"] == "Ответ"
+        r = await c2.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+        assert r.json()["stage"] == "mode_select"
+        r = await c2.post(f"/api/tasks/{tid}/advance", json={"action": "run_all"})
+        assert parse_sse(r.text)[-1]["stage"] == "review"
+    await app2.state.http_client.aclose()
+
+
+async def test_task_delete(app, client):
+    tid = (await client.post("/api/sessions", json={"kind": "task"})).json()["id"]
+    assert (await client.delete(f"/api/sessions/{tid}")).status_code == 204
+    assert (await client.get("/api/tasks")).json()["data"] == []
+
+
+# ── Задачи: пошаговый режим ─────────────────────────────────────────────────
+
+PLAN_TEXT = "1. Первый шаг.\n2. Второй шаг.\n3. Третий шаг."
+
+
+def _task_flow_app(monkeypatch):
+    """Приложение с транспортом: нумерованный план + результаты по шагам."""
+    import re
+
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import FakeStream, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+
+    class TaskFlowTransport(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.requests = []
+
+        async def handle_async_request(self, request):
+            self.requests.append(request)
+            body = json.loads(request.content)
+            joined = "\n".join(m.get("content", "") for m in body.get("messages", []))
+            if "планировщик" in joined:
+                text = PLAN_TEXT
+            elif "Переделай шаг" in joined:
+                match = re.search(r"Переделай шаг (\d+):", joined)
+                text = f"Исправленный шаг {match.group(1) if match else '?'}"
+            elif "ТОЛЬКО указанный шаг" in joined:
+                match = re.search(r"Выполни шаг (\d+):", joined)
+                text = f"Результат шага {match.group(1) if match else '?'}"
+            else:
+                text = "Результат всего плана"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=FakeStream(make_chat_chunks(content=text, usage=USAGE)),
+                request=request,
+            )
+
+    application = create_app()
+    transport = TaskFlowTransport()
+    application.state.http_client = httpx.AsyncClient(transport=transport)
+    application.state.opencode_session_id = "s"
+    application.state.registry = SessionRegistry(config.get_settings())
+    seed_test_profile(application.state.registry)
+    return application, transport
+
+
+async def test_task_step_mode(monkeypatch):
+    import httpx
+
+    application, transport = _task_flow_app(monkeypatch)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://t"
+    ) as c:
+        tid = (await c.post("/api/sessions", json={"kind": "task"})).json()["id"]
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Сделай X"})
+        assert (
+            await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+        ).json()["stage"] == "mode_select"
+
+        # по шагам: шаг 1 выполняется сразу
+        r = await c.post(f"/api/tasks/{tid}/advance", json={"action": "start_steps"})
+        ev = parse_sse(r.text)[-1]
+        assert ev["type"] == "stage"
+        assert ev["stage"] == "step_review"
+        assert ev["steps"] == ["Первый шаг.", "Второй шаг.", "Третий шаг."]
+        assert ev["step_results"] == ["Результат шага 1"]
+
+        # принять шаг → сразу выполняется следующий
+        r = await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm_step"})
+        assert parse_sse(r.text)[-1]["step_results"] == ["Результат шага 1", "Результат шага 2"]
+        r = await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm_step"})
+        assert parse_sse(r.text)[-1]["step_results"] == [
+            "Результат шага 1", "Результат шага 2", "Результат шага 3",
+        ]
+
+        # последний confirm_step — JSON: склейка и переход в review
+        r = await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm_step"})
+        assert r.headers["content-type"].startswith("application/json")
+        progress = r.json()
+        assert progress["stage"] == "review"
+        assert "Шаг 1: Первый шаг." in progress["result"]
+        assert "Результат шага 3" in progress["result"]
+
+        assert (
+            await c.post(f"/api/tasks/{tid}/advance", json={"action": "approve"})
+        ).json()["stage"] == "done"
+
+        task = (await c.get("/api/tasks")).json()["data"][0]
+        assert task["stage"] == "done"
+        assert [m["role"] for m in task["history"]] == [
+            "user", "assistant", "user", "assistant",
+            "user", "assistant", "user", "assistant",
+        ]
+        assert task["history"][2]["content"] == "Выполни шаг 1."
+        assert task["history"][4]["content"] == "Выполни шаг 2."
+
+        # исполнителю шага уходил только текущий шаг (+план и прошлые результаты)
+        step_body = json.loads(transport.requests[2].content)
+        joined = "\n".join(m.get("content", "") for m in step_body["messages"])
+        assert "Выполни шаг 2: Второй шаг." in joined
+        assert "Выполни шаг 3:" not in joined
+        assert "Результат шага 1" in joined
+    await application.state.http_client.aclose()
+
+
+async def test_task_step_revise_fixes_step(monkeypatch):
+    import httpx
+
+    application, _ = _task_flow_app(monkeypatch)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://t"
+    ) as c:
+        tid = (await c.post("/api/sessions", json={"kind": "task"})).json()["id"]
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Задача"})
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+        r = await c.post(f"/api/tasks/{tid}/advance", json={"action": "start_steps"})
+        assert parse_sse(r.text)[-1]["step_results"] == ["Результат шага 1"]
+
+        # доработка шага: результат текущего шага заменяется, план и прогресс целы
+        r = await c.post(f"/api/tasks/{tid}/advance", json={"action": "revise_step", "content": "Поправь шаг"})
+        ev = parse_sse(r.text)[-1]
+        assert ev["stage"] == "step_review"
+        assert ev["steps"] == ["Первый шаг.", "Второй шаг.", "Третий шаг."]
+        assert ev["step_results"] == ["Исправленный шаг 1"]
+
+        # продолжаем со второго шага с сохранённым исправленным результатом
+        r = await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm_step"})
+        assert parse_sse(r.text)[-1]["step_results"] == ["Исправленный шаг 1", "Результат шага 2"]
+
+        # перепись всего плана с этапа шага запрещена; пустой revise_step → 400
+        assert (await c.post(f"/api/tasks/{tid}/advance", json={"action": "revise", "content": "x"})).status_code == 409
+        assert (await c.post(f"/api/tasks/{tid}/advance", json={"action": "revise_step", "content": "  "})).status_code == 400
+
+        task = (await c.get("/api/tasks")).json()["data"][0]
+        assert task["stage"] == "step_review"
+        assert task["steps"] == ["Первый шаг.", "Второй шаг.", "Третий шаг."]
+        assert task["step_results"] == ["Исправленный шаг 1", "Результат шага 2"]
+        # в историю попали замечания и исправленный результат
+        contents = [m["content"] for m in task["history"]]
+        assert "Поправь шаг" in contents
+        assert "Исправленный шаг 1" in contents
+    await application.state.http_client.aclose()
+
+
+async def test_task_step_restart_resume(tmp_path, monkeypatch):
+    import re
+
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import FakeStream, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+    db = str(tmp_path / "chats.db")
+
+    class TaskFlowTransport(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.requests = []
+
+        async def handle_async_request(self, request):
+            self.requests.append(request)
+            body = json.loads(request.content)
+            joined = "\n".join(m.get("content", "") for m in body.get("messages", []))
+            if "планировщик" in joined:
+                text = PLAN_TEXT
+            elif "Переделай шаг" in joined:
+                match = re.search(r"Переделай шаг (\d+):", joined)
+                text = f"Исправленный шаг {match.group(1) if match else '?'}"
+            elif "ТОЛЬКО указанный шаг" in joined:
+                match = re.search(r"Выполни шаг (\d+):", joined)
+                text = f"Результат шага {match.group(1) if match else '?'}"
+            else:
+                text = "Результат всего плана"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=FakeStream(make_chat_chunks(content=text, usage=USAGE)),
+                request=request,
+            )
+
+    def build():
+        application = create_app()
+        application.state.http_client = httpx.AsyncClient(transport=TaskFlowTransport())
+        application.state.opencode_session_id = "s"
+        application.state.registry = SessionRegistry(
+            config.get_settings(), store=SessionStore(db)
+        )
+        application.state.registry.restore()
+        seed_test_profile(application.state.registry)
+        return application
+
+    app1 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://t") as c1:
+        tid = (await c1.post("/api/sessions", json={"kind": "task"})).json()["id"]
+        await c1.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Задача"})
+        await c1.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+        r = await c1.post(f"/api/tasks/{tid}/advance", json={"action": "start_steps"})
+        assert parse_sse(r.text)[-1]["stage"] == "step_review"
+    await app1.state.http_client.aclose()
+
+    # после рестарта шаговый прогресс восстановлен, продолжаем со второго шага
+    app2 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://t") as c2:
+        data = (await c2.get("/api/tasks")).json()["data"]
+        assert len(data) == 1
+        assert data[0]["stage"] == "step_review"
+        assert data[0]["steps"] == ["Первый шаг.", "Второй шаг.", "Третий шаг."]
+        assert data[0]["step_results"] == ["Результат шага 1"]
+        r = await c2.post(f"/api/tasks/{tid}/advance", json={"action": "confirm_step"})
+        assert parse_sse(r.text)[-1]["step_results"] == ["Результат шага 1", "Результат шага 2"]
+    await app2.state.http_client.aclose()

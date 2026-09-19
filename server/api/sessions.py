@@ -181,7 +181,7 @@ async def list_sessions(request: Request) -> dict:
     registry: SessionRegistry = request.app.state.registry
     data = []
     for session in registry.list_sessions():
-        if session.kind == SessionKind.EPHEMERAL:
+        if session.kind in (SessionKind.EPHEMERAL, SessionKind.TASK):
             continue
         data.append(
             {
@@ -337,6 +337,8 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
     session = registry.get(session_id)
     if session is None:
         raise HTTPException(404, "Session not found")
+    if session.kind == SessionKind.TASK:
+        raise HTTPException(400, "Task sessions use POST /api/tasks/{id}/advance")
     if session.busy:
         raise HTTPException(409, "Session is busy")
 

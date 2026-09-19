@@ -42,6 +42,15 @@ class ProfilesSyncRequest(BaseModel):
     active_id: Optional[str] = None
 
 
+class TaskAdvanceRequest(BaseModel):
+    """Тело ``POST /api/tasks/{id}/advance`` — действие протокола «Задачи»."""
+
+    action: str
+    content: Optional[str] = None
+    model: Optional[str] = None
+    settings: Optional[dict[str, Any]] = None
+
+
 class MessageCreateRequest(BaseModel):
     """Тело ``POST /api/sessions/{id}/messages``."""
 

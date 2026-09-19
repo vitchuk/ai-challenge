@@ -306,3 +306,40 @@ def test_profiles_persist_across_reopen(tmp_path):
     assert [x.id for x in store2.load_profiles()] == ["p"]
     assert store2.get_state("active_profile") == "p"
     store2.close()
+
+
+# ── Состояние задачи (протокол «Задачи») ────────────────────────────────────
+
+def test_task_state_roundtrip(tmp_path):
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    task = make_chat(chat_id="t1", kind=SessionKind.TASK)
+    store.save_session(task)
+    store.save_task_state(task.id, "plan_review", "план", None)
+
+    loaded = store.load_all()[0]
+    assert loaded.task_stage == "plan_review"
+    assert loaded.task_plan == "план"
+    assert loaded.task_result is None
+    store.close()
+
+
+def test_task_state_persists_across_reopen(tmp_path):
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    task = make_chat(chat_id="t1", kind=SessionKind.TASK)
+    store.save_session(task)
+    store.save_task_state(
+        task.id, "step_review", "план", None,
+        steps=["Шаг один", "Шаг два"], step_results=["результат 1"],
+    )
+    store.close()
+
+    store2 = SessionStore(db)
+    loaded = store2.load_all()[0]
+    assert loaded.task_stage == "step_review"
+    assert loaded.task_plan == "план"
+    assert loaded.task_result is None
+    assert loaded.task_steps == ["Шаг один", "Шаг два"]
+    assert loaded.task_step_results == ["результат 1"]
+    store2.close()

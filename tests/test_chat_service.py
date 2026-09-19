@@ -114,6 +114,29 @@ def test_stream_completion_prepends_extra_system():
     assert runner.seen_messages[0] == {"role": "system", "content": "JSON"}
 
 
+def test_stream_completion_uses_messages_override():
+    """Переданные сообщения (протокол «Задачи») заменяют сборку по истории."""
+    svc = ChatService("c1", model="m", system_prompt="sys", settings=GenerationSettings())
+    svc.add_user_message("q")
+    runner = FakeRunner([])
+    spec = type("Spec", (), {"model": "m", "model_label": "opencode/m"})()
+    custom = [
+        {"role": "system", "content": "PROTOCOL"},
+        {"role": "user", "content": "PLAN"},
+    ]
+    asyncio_run(consume_stream(svc, runner, spec, messages=custom))
+    assert runner.seen_messages == custom
+
+
+def test_task_session_starts_at_input_stage():
+    task = ChatService("t1", kind=SessionKind.TASK)
+    assert task.task_stage == "input"
+    assert task.task_plan is None
+    assert task.task_result is None
+    # у обычного чата этапов нет
+    assert ChatService("c1").task_stage is None
+
+
 def test_rollback_user_message():
     svc = ChatService("c1")
     svc.add_user_message("q")
@@ -191,8 +214,10 @@ def asyncio_run(coro):
     asyncio.run(coro)
 
 
-async def consume_stream(svc, runner, spec, extra_system=None):
-    async for _ in svc.stream_completion(runner, spec, extra_system=extra_system):
+async def consume_stream(svc, runner, spec, extra_system=None, messages=None):
+    async for _ in svc.stream_completion(
+        runner, spec, extra_system=extra_system, messages=messages
+    ):
         pass
 
 

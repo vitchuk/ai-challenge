@@ -79,13 +79,22 @@ CREATE TABLE IF NOT EXISTS session_memory (
     updated_at  REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_task_state (
+    session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    stage        TEXT NOT NULL DEFAULT 'input',
+    plan         TEXT,
+    result       TEXT,
+    steps        TEXT NOT NULL DEFAULT '[]',
+    step_results TEXT NOT NULL DEFAULT '[]',
+    updated_at   REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS profiles (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     fields      TEXT NOT NULL DEFAULT '{}',
     updated_at  REAL NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -99,6 +108,8 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("llm_requests", "reasoning_tokens", "INTEGER"),
     ("sessions", "parent_id", "TEXT"),
     ("sessions", "title", "TEXT"),
+    ("session_task_state", "steps", "TEXT NOT NULL DEFAULT '[]'"),
+    ("session_task_state", "step_results", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 # Устаревшие таблицы, которые удаляются при открытии БД.
@@ -307,6 +318,50 @@ class SessionStore:
                 updated_at = excluded.updated_at
             """,
             (session_id, json.dumps(persistent, ensure_ascii=False), time.time()),
+        )
+        self._conn.commit()
+
+    def save_task_state(
+        self,
+        session_id: str,
+        stage: str,
+        plan: Optional[str],
+        result: Optional[str],
+        steps: Optional[list[str]] = None,
+        step_results: Optional[list[str]] = None,
+    ) -> None:
+        """Сохраняет (upsert) состояние задачи (этап, план, результат, шаги).
+
+        Args:
+            session_id: идентификатор сессии-задачи.
+            stage: текущий этап протокола «Задачи».
+            plan: текущий план (или ``None``).
+            result: текущий результат (или ``None``).
+            steps: разобранные шаги плана (пошаговый режим).
+            step_results: результаты выполненных шагов.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO session_task_state
+                (session_id, stage, plan, result, steps, step_results, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                stage = excluded.stage,
+                plan = excluded.plan,
+                result = excluded.result,
+                steps = excluded.steps,
+                step_results = excluded.step_results,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                stage,
+                plan,
+                result,
+                json.dumps(steps or [], ensure_ascii=False),
+                json.dumps(step_results or [], ensure_ascii=False),
+                time.time(),
+            ),
         )
         self._conn.commit()
 
@@ -526,5 +581,20 @@ class SessionStore:
                         for store in loaded_stores
                         if isinstance(store, dict)
                     ]
+            task_row = self._conn.execute(
+                "SELECT stage, plan, result, steps, step_results "
+                "FROM session_task_state WHERE session_id = ?",
+                (row["id"],),
+            ).fetchone()
+            if task_row is not None:
+                chat.task_stage = task_row["stage"]
+                chat.task_plan = task_row["plan"]
+                chat.task_result = task_row["result"]
+                loaded_steps = json.loads(task_row["steps"] or "[]")
+                if isinstance(loaded_steps, list):
+                    chat.task_steps = [str(item) for item in loaded_steps]
+                loaded_step_results = json.loads(task_row["step_results"] or "[]")
+                if isinstance(loaded_step_results, list):
+                    chat.task_step_results = [str(item) for item in loaded_step_results]
             result.append(chat)
         return result
