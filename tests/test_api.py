@@ -1408,3 +1408,256 @@ async def test_task_step_restart_resume(tmp_path, monkeypatch):
         r = await c2.post(f"/api/tasks/{tid}/advance", json={"action": "confirm_step"})
         assert parse_sse(r.text)[-1]["step_results"] == ["Результат шага 1", "Результат шага 2"]
     await app2.state.http_client.aclose()
+
+
+# ── Правила (глобальные ограничения) ────────────────────────────────────────
+
+RULES_PAYLOAD = {
+    "rules": [
+        {
+            "id": "rl-1",
+            "name": "Безопасность",
+            "items": [["Пароли", "никогда не выводить"], ["Код", "без секретов"]],
+        }
+    ]
+}
+
+
+async def test_rules_sync_and_list(client):
+    assert (await client.get("/api/rules")).json() == {"rules": []}
+
+    r = await client.put("/api/rules", json=RULES_PAYLOAD)
+    assert r.status_code == 200
+    data = r.json()
+    assert [x["name"] for x in data["rules"]] == ["Безопасность"]
+    assert data["rules"][0]["id"] == "rl-1"
+    assert data["rules"][0]["items"] == [
+        ["Пароли", "никогда не выводить"],
+        ["Код", "без секретов"],
+    ]
+    assert (await client.get("/api/rules")).json()["rules"][0]["name"] == "Безопасность"
+
+
+async def test_rules_sanitize(client):
+    r = await client.put("/api/rules", json={"rules": [
+        {"id": "", "name": "", "items": []},
+        {"id": "a", "name": "   ", "items": [["k", "v"]]},
+        {"id": "b", "name": "Правила", "items": [["", "v"], ["k", ""], ["ok", "v"], "bad"]},
+    ]})
+    data = r.json()
+    assert len(data["rules"]) == 1
+    assert data["rules"][0]["name"] == "Правила"
+    assert data["rules"][0]["items"] == [["ok", "v"]]
+    # отсутствие поля rules очищает правила
+    assert (await client.put("/api/rules", json={})).json() == {"rules": []}
+
+
+async def test_rules_injected_into_chat(app, client):
+    await client.put("/api/rules", json=RULES_PAYLOAD)
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    await client.put(f"/api/sessions/{sid}/memory", json={"stores": MEMORY_STORES})
+
+    r = await client.post(f"/api/sessions/{sid}/messages", json={"content": "привет"})
+    assert parse_sse(r.text)[-1]["type"] == "done"
+    body = json.loads(app.state.mock_transport.requests[-1].content)
+    # правила — первым элементом ведущего system-сообщения, профиль — после
+    system0 = body["messages"][0]
+    assert system0["role"] == "system"
+    assert "[Правила]" in system0["content"]
+    assert "## Безопасность" in system0["content"]
+    assert "Пароли: никогда не выводить" in system0["content"]
+    assert "Никогда не нарушай" in system0["content"]
+    assert system0["content"].index("[Правила]") < system0["content"].index("[Профиль пользователя]")
+    # память — отдельным user-сообщением; правила отдельным не дублируются
+    assert any(
+        m["role"] == "user" and "[Память чата]" in m["content"] for m in body["messages"]
+    )
+    assert not any(
+        m["role"] == "user" and m["content"].startswith("[Правила]")
+        for m in body["messages"]
+    )
+
+
+async def test_rules_priority_texts(app, client):
+    from server.services.chat_service import PROFILE_SYSTEM_PREFIX, RULES_INSTRUCTION
+
+    assert "приоритет над профилем" in RULES_INSTRUCTION
+    assert "приоритет у правил" in PROFILE_SYSTEM_PREFIX
+
+
+async def test_rules_in_summary_and_optimize(app, client):
+    await client.put("/api/rules", json=RULES_PAYLOAD)
+
+    sid = (await client.post("/api/sessions", json={"kind": "summary"})).json()["id"]
+    await client.post(f"/api/sessions/{sid}/messages", json={"content": "итоги"})
+    body = json.loads(app.state.mock_transport.requests[-1].content)
+    systems = [m["content"] for m in body["messages"] if m["role"] == "system"]
+    assert any("[Правила]" in t for t in systems)
+
+    eid = (await client.post("/api/sessions", json={"kind": "ephemeral"})).json()["id"]
+    await client.post(f"/api/sessions/{eid}/messages", json={"content": "запрос"})
+    body = json.loads(app.state.mock_transport.requests[-1].content)
+    systems = [m["content"] for m in body["messages"] if m["role"] == "system"]
+    assert any("[Правила]" in t for t in systems)
+
+
+async def test_rules_in_tasks(monkeypatch):
+    import httpx
+
+    application, transport = _task_flow_app(monkeypatch)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://t"
+    ) as c:
+        await c.put("/api/rules", json=RULES_PAYLOAD)
+        tid = (await c.post("/api/sessions", json={"kind": "task"})).json()["id"]
+
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Задача"})
+        planner = json.loads(transport.requests[-1].content)
+        planner_systems = [
+            m["content"] for m in planner["messages"] if m["role"] == "system"
+        ]
+        assert any("планировщик" in t and "[Правила]" in t for t in planner_systems)
+
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "run_all"})
+        executor = json.loads(transport.requests[-1].content)
+        executor_systems = [
+            m["content"] for m in executor["messages"] if m["role"] == "system"
+        ]
+        assert any("исполнитель" in t and "[Правила]" in t for t in executor_systems)
+    await application.state.http_client.aclose()
+
+
+async def test_rules_absent_in_hidden_requests(app, client):
+    await client.put("/api/rules", json=RULES_PAYLOAD)
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    transport = app.state.mock_transport
+    r = await client.post(f"/api/sessions/{sid}/messages", json={
+        "content": "меня зовут Аня",
+        "settings": {"context_strategy": {"strategy": "facts", "n": 5, "k": 2}},
+    })
+    assert any(e["type"] == "done" for e in parse_sse(r.text))
+    # основной запрос — с правилами; скрытый экстрактор фактов — без
+    main_body = json.loads(transport.requests[-2].content)
+    facts_body = json.loads(transport.requests[-1].content)
+    assert any("[Правила]" in m["content"] for m in main_body["messages"])
+    assert not any("[Правила]" in m["content"] for m in facts_body["messages"])
+
+
+async def test_rules_empty_no_block(app, client):
+    sid = (await client.post("/api/sessions", json={})).json()["id"]
+    r = await client.post(f"/api/sessions/{sid}/messages", json={"content": "привет"})
+    assert parse_sse(r.text)[-1]["type"] == "done"
+    body = json.loads(app.state.mock_transport.requests[-1].content)
+    # отдельного блока правил нет (упоминание «[Правила]» в профиле — это
+    # примечание о приоритете, а не сам блок с ограничениями)
+    assert not any(m["content"].startswith("[Правила]") for m in body["messages"])
+    assert not any("Никогда не нарушай" in m["content"] for m in body["messages"])
+
+
+async def test_rules_persist_after_restart(tmp_path, monkeypatch):
+    import httpx
+
+    from server import config
+    from server.main import create_app
+    from server.services.registry import SessionRegistry
+    from tests.conftest import MockTransport, USAGE, make_chat_chunks
+
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(
+        deepseek_api_key="sk-test", opencode_api_key="zen-test",
+    ))
+    db = str(tmp_path / "chats.db")
+
+    def build():
+        application = create_app()
+        transport = MockTransport(make_chat_chunks(content="Ответ", usage=USAGE))
+        application.state.http_client = httpx.AsyncClient(transport=transport)
+        application.state.opencode_session_id = "s"
+        application.state.registry = SessionRegistry(
+            config.get_settings(), store=SessionStore(db)
+        )
+        application.state.registry.restore()
+        seed_test_profile(application.state.registry)
+        return application, transport
+
+    app1, _ = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app1), base_url="http://t") as c1:
+        assert (await c1.put("/api/rules", json=RULES_PAYLOAD)).status_code == 200
+    await app1.state.http_client.aclose()
+
+    app2, transport2 = build()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://t") as c2:
+        data = (await c2.get("/api/rules")).json()["rules"]
+        assert [x["name"] for x in data] == ["Безопасность"]
+        sid = (await c2.post("/api/sessions", json={})).json()["id"]
+        r = await c2.post(f"/api/sessions/{sid}/messages", json={"content": "привет"})
+        assert parse_sse(r.text)[-1]["type"] == "done"
+        body = json.loads(transport2.requests[-1].content)
+        assert any("[Правила]" in m["content"] for m in body["messages"])
+    await app2.state.http_client.aclose()
+
+
+# ── Журнал промптов (вкладка «Логи») ────────────────────────────────────────
+
+async def test_prompt_logs_chat(app, client):
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    await client.post(f"/api/sessions/{sid}/messages", json={"content": "привет"})
+
+    logs = (await client.get("/api/logs")).json()["logs"]
+    assert len(logs) == 1
+    entry = logs[0]
+    assert entry["kind"] == "main"
+    assert entry["source"] == "Чат"
+    assert entry["response"] == "Ответ"
+    assert entry["model"] == "opencode/glm-5.3"
+    assert entry["prompt_tokens"] == 202
+    assert entry["completion_tokens"] == 233
+    assert entry["messages"][0]["role"] == "system"
+    assert any("привет" in m["content"] for m in entry["messages"])
+
+    assert (await client.delete("/api/logs")).status_code == 204
+    assert (await client.get("/api/logs")).json()["logs"] == []
+
+
+async def test_prompt_logs_include_hidden(app, client):
+    sid = (await client.post(
+        "/api/sessions", json={"model": "opencode/glm-5.3"}
+    )).json()["id"]
+    r = await client.post(f"/api/sessions/{sid}/messages", json={
+        "content": "меня зовут Аня",
+        "settings": {"context_strategy": {"strategy": "facts", "n": 5, "k": 2}},
+    })
+    assert any(e["type"] == "done" for e in parse_sse(r.text))
+
+    logs = (await client.get("/api/logs")).json()["logs"]
+    kinds = [e["kind"] for e in logs]
+    assert kinds == ["facts", "main"]  # сначала новые
+    facts = next(e for e in logs if e["kind"] == "facts")
+    assert any("экстрактор" in m["content"].lower() for m in facts["messages"])
+    assert facts["response"] == "Ответ"
+
+
+async def test_prompt_logs_tasks(monkeypatch):
+    import httpx
+
+    application, _ = _task_flow_app(monkeypatch)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://t"
+    ) as c:
+        tid = (await c.post("/api/sessions", json={"kind": "task"})).json()["id"]
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "describe", "content": "Задача"})
+        logs = (await c.get("/api/logs")).json()["logs"]
+        assert logs and logs[0]["kind"] == "describe"
+        assert logs[0]["source"] == "Задача"
+
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "confirm"})
+        await c.post(f"/api/tasks/{tid}/advance", json={"action": "run_all"})
+        kinds = [e["kind"] for e in (await c.get("/api/logs")).json()["logs"]]
+        assert kinds[:2] == ["run_all", "describe"]
+    await application.state.http_client.aclose()

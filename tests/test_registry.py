@@ -5,6 +5,7 @@ from server.services.chat_service import (
     PROFILE_FIELDS,
     MessageMeta,
     Profile,
+    RuleStore,
     SessionKind,
 )
 from server.services.generation import GenerationSettings
@@ -229,4 +230,39 @@ def test_profiles_persist_across_restart(tmp_path):
     assert [x.id for x in reg2.list_profiles()] == ["p1"]
     assert reg2.get_active_profile_id() == "p1"
     assert reg2.get_active_profile().fields["address"] == "значение"
+    reg2.close()
+
+
+# ── Правила приложения ──────────────────────────────────────────────────────
+
+def test_rules_frame_none_and_format():
+    reg = SessionRegistry()
+    assert reg.rules_frame() is None
+
+    reg.replace_rules([
+        RuleStore(id="a", name="Первое", items=[["K1", "V1"]]),
+        RuleStore(id="b", name="Пустое", items=[]),
+    ])
+    frame = reg.rules_frame()
+    assert frame is not None
+    assert "[Правила]" in frame
+    assert "## Первое" in frame
+    assert "K1: V1" in frame
+    assert "## Пустое" not in frame
+    assert "Никогда не нарушай" in frame
+
+    reg.replace_rules([])
+    assert reg.rules_frame() is None
+
+
+def test_rules_persist_across_restart(tmp_path):
+    db = str(tmp_path / "t.db")
+    reg = make_registry_with_store(db)
+    reg.replace_rules([RuleStore(id="rl-1", name="Правила", items=[["K", "V"]])])
+    reg.close()
+
+    reg2 = make_registry_with_store(db)
+    reg2.restore()
+    assert [r.id for r in reg2.list_rules()] == ["rl-1"]
+    assert "K: V" in reg2.rules_frame()
     reg2.close()

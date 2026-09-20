@@ -6,6 +6,7 @@ from .chat_service import (
     MessageMeta,
     MessageRecord,
     Profile,
+    RuleStore,
     SessionKind,
 )
 from .generation import GenerationSettings, sanitize_settings
@@ -19,6 +20,7 @@ __all__ = [
     "MessageMeta",
     "MessageRecord",
     "Profile",
+    "RuleStore",
     "SessionKind",
     "SessionRegistry",
     "SessionStore",

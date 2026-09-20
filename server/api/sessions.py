@@ -110,6 +110,16 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _collect_prompt_logs(
+    registry: SessionRegistry, session: ChatService, source: str, title: str
+) -> None:
+    """Переносит журнал промптов сессии в общий буфер реестра (вкладка «Логи»)."""
+    if not session.prompt_log_queue:
+        return
+    registry.add_prompt_logs(session.prompt_log_queue, source=source, title=title)
+    session.prompt_log_queue = []
+
+
 def _resolve_spec(
     registry: SessionRegistry,
     session: ChatService,
@@ -368,6 +378,11 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
             if profile_block
             else body.system_prompt
         )
+    # Правила (глобальные ограничения) — первым элементом ведущего
+    # system-сообщения: приоритет над профилем и прочими указаниями.
+    rules_frame = registry.rules_frame()
+    if rules_frame:
+        extra_system = f"{rules_frame}\n\n{extra_system}" if extra_system else rules_frame
     # Модель и «привязываемые» параметры (temperature/top_p/top_k) фиксируются
     # первым сообщением чата; далее изменения игнорируются.
     if body.model and first_message:
@@ -397,6 +412,13 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
     if session.kind == SessionKind.SUMMARY:
         session.system_prompt = registry.summary_system_prompt(session.id)
 
+    prompt_source = {
+        SessionKind.CHAT: "Чат",
+        SessionKind.SUMMARY: "Итоги",
+        SessionKind.EPHEMERAL: "Оптимизация промпта",
+    }.get(session.kind, "Чат")
+    prompt_title = session.title or ""
+
     runner = StreamedCompletion(client=request.app.state.http_client)
 
     async def event_stream():
@@ -424,6 +446,7 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
             registry.persist_new_requests(session)
             for frame in drain_request_logs():
                 yield frame
+            _collect_prompt_logs(registry, session, prompt_source, prompt_title)
 
             async for event in session.stream_completion(
                 runner,
@@ -436,6 +459,7 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
                     for frame in drain_request_logs():
                         yield frame
                 yield _sse(event)
+            _collect_prompt_logs(registry, session, prompt_source, prompt_title)
             # Успешное завершение: сохраняем пару user+assistant и записи.
             registry.remember_pair(session)
             # Стратегия facts: после ответа обновляем канонические факты.
@@ -447,6 +471,7 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
             registry.persist_new_requests(session)
             for frame in drain_request_logs():
                 yield frame
+            _collect_prompt_logs(registry, session, prompt_source, prompt_title)
             if updated_facts is not None:
                 yield _sse({"type": "facts", "items": updated_facts})
         except ProviderError as exc:

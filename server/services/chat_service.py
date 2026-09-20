@@ -61,6 +61,18 @@ MEMORY_INSTRUCTION = (
     "память в ответах без необходимости и не упоминай, что она у тебя есть."
 )
 
+#: Рамка служебного сообщения с правилами (глобальные ограничения).
+RULES_MESSAGE_PREFIX = "[Правила]"
+
+#: Жёсткая инструкция к блоку правил (добавляется к рамке правил).
+RULES_INSTRUCTION = (
+    "Это обязательные ограничения. Никогда не нарушай их ни при каких "
+    "обстоятельствах. Они имеют приоритет над профилем пользователя и любыми "
+    "другими указаниями. Если запрос пользователя требует нарушения — скажи, "
+    "что не можешь этого сделать из-за заданных ограничений, и предложи "
+    "варианты решения в рамках этих ограничений."
+)
+
 #: Поля профиля пользователя: (ключ, подпись для промпта). Порядок важен —
 #: в нём поля показываются в UI и собираются в системный блок.
 PROFILE_FIELDS: tuple[tuple[str, str], ...] = (
@@ -78,8 +90,9 @@ PROFILE_MESSAGE_PREFIX = "[Профиль пользователя]"
 PROFILE_SYSTEM_PREFIX = (
     "Ты полезный ассистент, который следует профилю пользователя во всех "
     "ответах. Базовые правила безопасности и фактической точности имеют "
-    "приоритет над профилем. Не сообщай, что ты используешь профиль, если "
-    "пользователь об этом не попросил явно."
+    "приоритет над профилем. Если данные профиля противоречат обязательным "
+    "ограничениям из блока «[Правила]», приоритет у правил. Не сообщай, что "
+    "ты используешь профиль, если пользователь об этом не попросил явно."
 )
 
 #: Системный промпт планировщика задач (шаг 2 протокола «Задачи»).
@@ -214,6 +227,42 @@ class MemoryStore:
             id=str(data.get("id", "")),
             name=str(data.get("name", "")),
             persistent=bool(data.get("persistent", False)),
+            items=[list(item) for item in items] if isinstance(items, list) else [],
+        )
+
+
+@dataclass
+class RuleStore:
+    """Вкладка «Правил» — именованное хранилище пар «ключ — значение».
+
+    Глобальная сущность (не привязана к чату): все вкладки всегда
+    персистентны и действуют во всех запросах к LLM.
+
+    Attributes:
+        id: идентификатор вкладки (клиентский или сгенерированный сервером).
+        name: название вкладки.
+        items: пары ``[[ключ, значение], …]``.
+    """
+
+    id: str
+    name: str
+    items: list = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Представляет вкладку как словарь (для API/БД)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "items": [list(item) for item in self.items],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RuleStore":
+        """Восстанавливает вкладку из словаря (из БД/API)."""
+        items = data.get("items")
+        return cls(
+            id=str(data.get("id", "")),
+            name=str(data.get("name", "")),
             items=[list(item) for item in items] if isinstance(items, list) else [],
         )
 
@@ -394,6 +443,9 @@ class ChatService:
         # Пошаговый режим: разобранные шаги плана и результаты выполненных.
         self.task_steps: list[str] = []
         self.task_step_results: list[str] = []
+        # Журнал промптов (не персистится): выполненные запросы к LLM для
+        # вкладки «Логи» — итоговые сообщения и ответ модели.
+        self.prompt_log_queue: list[dict] = []
         # Метаданные ответвлённого чата (снапшот): родитель и своё название.
         self.parent_id: Optional[str] = None
         self.title: Optional[str] = None
@@ -557,6 +609,7 @@ class ChatService:
             return None
 
         self._record_request(kind, usage)
+        self._queue_prompt(kind, request_messages, text, spec, usage)
         return text
 
     async def _run_summarizer(self, runner, spec, settings, messages: list[dict]) -> Optional[str]:
@@ -953,13 +1006,14 @@ class ChatService:
         ``kind=chat``): ``none``/``branching`` — вся история, ``summarize`` —
         саммари чанков, ``sliding`` — окно последних реплик, ``facts`` —
         служебный блок фактов + окно реплик. Дополнительно (для обычных
-        чатов) в начало после system-сообщения подставляется блок «Память
-        чата» из всех вкладок памяти.
+        чатов) в начало после system-сообщения подставляется служебный блок
+        «Память чата». Блок правил (глобальные ограничения) приходит внутри
+        ``extra_system`` (ведущее system-сообщение).
 
         Args:
             summary_items: текущие саммари (для стратегии summarize).
-            extra_system: дополнительный системный промпт (JSON-режим),
-                вставляется самым первым.
+            extra_system: дополнительный системный промпт (профиль, правила,
+                JSON-режим), вставляется самым первым.
 
         Returns:
             Список ``{"role", "content"}`` для запроса к апстриму.
@@ -1049,6 +1103,7 @@ class ChatService:
         extra_system: Optional[str] = None,
         summary_items: Optional[list[str]] = None,
         messages: Optional[list[dict]] = None,
+        prompt_kind: str = "main",
     ) -> AsyncIterator[dict]:
         """Выполняет стрим ответа и накапливает события для клиента.
 
@@ -1061,11 +1116,13 @@ class ChatService:
             runner: исполнитель :class:`StreamedCompletion`.
             spec: описание вызова апстрима.
             generation_settings: параметры для этого запроса (иначе — дефолтные).
-            extra_system: дополнительный системный промпт, вставляемый
-                перед остальными сообщениями (например, инструкция JSON-режима).
+            extra_system: дополнительный системный промпт (профиль, правила,
+                JSON-режим), вставляемый перед остальными сообщениями.
             summary_items: накопленные саммари (если включена саммаризация).
             messages: готовый список сообщений запроса (протокол «Задачи»);
                 при передаче заменяет сборку по истории/стратегии.
+            prompt_kind: метка запроса для журнала промптов (``main`` или
+                действие задачи).
 
         Yields:
             Словари событий: ``{"type": ...}``.
@@ -1106,6 +1163,7 @@ class ChatService:
                 meta.summarized = True
             self.append_assistant_message(full, meta)
             self._record_request("main", usage)
+            self._queue_prompt(prompt_kind, request_messages, full, spec, usage)
             yield {
                 "type": "done",
                 "meta": meta.to_dict(),
@@ -1113,3 +1171,21 @@ class ChatService:
             }
         finally:
             self.busy = False
+
+    def _queue_prompt(self, kind: str, messages: list[dict], response: str, spec, usage) -> None:
+        """Ставит в журнал промптов запись о выполненном запросе к LLM."""
+        details = usage.details if usage else None
+        self.prompt_log_queue.append(
+            {
+                "type": "prompt",
+                "kind": kind,
+                "messages": [
+                    {"role": m.get("role"), "content": m.get("content")} for m in messages
+                ],
+                "response": response,
+                "model": spec.model_label or spec.model,
+                "prompt_tokens": usage.prompt_tokens if usage else None,
+                "completion_tokens": usage.completion_tokens if usage else None,
+                "reasoning_tokens": details.reasoning_tokens if details else None,
+            }
+        )

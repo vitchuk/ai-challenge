@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Помогатор2К</title>
-  <link rel="stylesheet" href="style.css?v=21" />
+  <link rel="stylesheet" href="style.css?v=23" />
 </head>
 <body>
   <div class="app">
@@ -31,6 +31,9 @@
         <button id="view-tab-memory" class="chat__view-tab" type="button">
           Память
         </button>
+        <button id="view-tab-rules" class="chat__view-tab" type="button">
+          Правила
+        </button>
         <button
           id="view-tab-profile"
           class="chat__view-tab chat__view-tab--profile"
@@ -38,6 +41,15 @@
         >
           <span id="view-tab-profile-icon" class="chat__view-icon"></span>
           Профиль
+        </button>
+        <button
+          id="view-tab-logs"
+          class="chat__view-tab chat__view-tab--logs"
+          type="button"
+          title="Логи промптов"
+          aria-label="Логи промптов"
+        >
+          <span id="view-tab-logs-icon" class="chat__view-icon"></span>
         </button>
       </div>
 
@@ -138,6 +150,45 @@
           </div>
         </div>
         <div id="profile-editor" class="memory__editor"></div>
+      </section>
+
+      <section id="rules-view" class="chat__rules" hidden>
+        <div id="rules-tabs" class="memory__tabs">
+          <div id="rules-tab-list" class="memory__tab-list"></div>
+          <div class="memory__create">
+            <input
+              id="rules-new-name"
+              class="memory__name"
+              type="text"
+              placeholder="Название вкладки"
+            />
+            <button
+              id="rules-add"
+              class="memory__add"
+              type="button"
+              title="Создать вкладку правил"
+            >
+              +
+            </button>
+          </div>
+        </div>
+        <div id="rules-editor" class="memory__editor"></div>
+      </section>
+
+      <section id="logs-view" class="chat__logs" hidden>
+        <div class="logs__head">
+          <span class="logs__title">Логи промптов</span>
+          <span id="logs-count" class="logs__count"></span>
+          <span class="logs__head-actions">
+            <button id="logs-refresh" class="tasks__btn tasks__btn--ghost" type="button">
+              Обновить
+            </button>
+            <button id="logs-clear" class="tasks__btn tasks__btn--ghost" type="button">
+              Очистить
+            </button>
+          </span>
+        </div>
+        <div id="logs-list" class="logs__list"></div>
       </section>
 
       <div id="facts-splitter" class="chat__splitter" hidden></div>
@@ -355,6 +406,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=21"></script>
+  <script src="app.js?v=23"></script>
 </body>
 </html>
