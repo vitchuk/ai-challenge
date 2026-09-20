@@ -1619,6 +1619,220 @@ body {
   font-size: 13px;
 }
 
+/* ── Вид «Правила» (глобальные ограничения; механика как у «Памяти») ─────── */
+.chat__rules {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 16px;
+}
+
+/* Кнопка-вид «Логи промптов» — только иконка. */
+.chat__view-tab--logs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 12px;
+}
+
+/* ── Вид «Логи промптов» ─────────────────────────────────────────────────── */
+.chat__logs {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 16px;
+}
+
+.logs__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.logs__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.logs__count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.logs__head-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+}
+
+/* Тонкий скроллбар журнала в палитре темы (правило проекта). */
+.logs__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.logs__list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.logs__list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.logs__list::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 4px;
+}
+
+.logs__list::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 140, 255, 0.7);
+}
+
+.logs__empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.logs__entry {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.logs__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.logs__time {
+  font-variant-numeric: tabular-nums;
+}
+
+.logs__badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.logs__badge--source {
+  background: rgba(79, 140, 255, 0.16);
+  color: #9bd0ff;
+}
+
+.logs__badge--kind {
+  background: rgba(76, 175, 125, 0.16);
+  color: #7fd0a0;
+}
+
+.logs__tokens {
+  font-variant-numeric: tabular-nums;
+}
+
+.logs__title-inline {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logs__label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+
+.logs__text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.logs__user {
+  border-left: 2px solid var(--accent);
+  padding-left: 10px;
+}
+
+.logs__prompt summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.logs__prompt summary::-webkit-details-marker {
+  display: none;
+}
+
+.logs__prompt[open] summary {
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.logs__msg {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.logs__msg-role {
+  flex: none;
+  width: 64px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.logs__msg-role--system {
+  color: #e8a33d;
+}
+
+.logs__msg-role--assistant {
+  color: #7fd0a0;
+}
+
+.logs__msg-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
+.logs__response {
+  border-left: 2px solid #4caf7d;
+  padding-left: 10px;
+}
+
 /* ── Вид «Профиль» (глобальные профили пользователя) ─────────────────────── */
 .chat__profile {
   flex: 1 1 auto;

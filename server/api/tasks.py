@@ -32,7 +32,7 @@ from ..services.chat_service import (
     TASK_STEP_REVISE_SYSTEM_PROMPT,
 )
 from ..services.registry import SessionRegistry
-from .sessions import _provider_error_event, _resolve_spec, _sse
+from .sessions import _collect_prompt_logs, _provider_error_event, _resolve_spec, _sse
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -77,11 +77,23 @@ def _task_description(task: ChatService) -> str:
     return ""
 
 
-def _system_with_profile(system_prompt: str, profile_block: Optional[str]) -> str:
-    """Системный промпт с добавленным блоком профиля (если он есть)."""
+def _system_with_profile(
+    system_prompt: str,
+    profile_block: Optional[str],
+    rules_frame: Optional[str] = None,
+) -> str:
+    """Системный промпт с добавленными блоками правил и профиля.
+
+    Порядок: правила → профиль → служебный промпт этапа (жёсткие ограничения
+    идут первыми — у них приоритет над профилем и прочими указаниями).
+    """
+    parts = []
+    if rules_frame:
+        parts.append(rules_frame)
     if profile_block:
-        return f"{profile_block}\n\n{system_prompt}"
-    return system_prompt
+        parts.append(profile_block)
+    parts.append(system_prompt)
+    return "\n\n".join(parts)
 
 
 def _parse_steps(plan: str) -> list[str]:
@@ -130,6 +142,7 @@ def _planner_messages(
     profile_block: Optional[str],
     steps: Optional[list[str]] = None,
     step_results: Optional[list[str]] = None,
+    rules_frame: Optional[str] = None,
 ) -> list[dict]:
     """Сообщения запроса планировщика (шаг 2 — новый/исправленный план)."""
     parts = [f"Задача:\n{description}"]
@@ -145,20 +158,27 @@ def _planner_messages(
     return [
         {
             "role": "system",
-            "content": _system_with_profile(TASK_PLANNER_SYSTEM_PROMPT, profile_block),
+            "content": _system_with_profile(
+                TASK_PLANNER_SYSTEM_PROMPT, profile_block, rules_frame
+            ),
         },
         {"role": "user", "content": "\n\n".join(parts)},
     ]
 
 
 def _executor_messages(
-    description: str, plan: str, profile_block: Optional[str]
+    description: str,
+    plan: str,
+    profile_block: Optional[str],
+    rules_frame: Optional[str] = None,
 ) -> list[dict]:
     """Сообщения запроса исполнителя (выполнение всего плана)."""
     return [
         {
             "role": "system",
-            "content": _system_with_profile(TASK_EXECUTOR_SYSTEM_PROMPT, profile_block),
+            "content": _system_with_profile(
+                TASK_EXECUTOR_SYSTEM_PROMPT, profile_block, rules_frame
+            ),
         },
         {"role": "user", "content": f"Задача:\n{description}\n\nПодтверждённый план:\n{plan}"},
     ]
@@ -171,6 +191,7 @@ def _step_executor_messages(
     results: list[str],
     index: int,
     profile_block: Optional[str],
+    rules_frame: Optional[str] = None,
 ) -> list[dict]:
     """Сообщения запроса исполнителя одного шага (пошаговый режим)."""
     parts = [f"Задача:\n{description}", f"Полный план:\n{plan}"]
@@ -183,7 +204,7 @@ def _step_executor_messages(
         {
             "role": "system",
             "content": _system_with_profile(
-                TASK_STEP_EXECUTOR_SYSTEM_PROMPT, profile_block
+                TASK_STEP_EXECUTOR_SYSTEM_PROMPT, profile_block, rules_frame
             ),
         },
         {"role": "user", "content": "\n\n".join(parts)},
@@ -198,6 +219,7 @@ def _step_revise_messages(
     index: int,
     feedback: str,
     profile_block: Optional[str],
+    rules_frame: Optional[str] = None,
 ) -> list[dict]:
     """Сообщения запроса переделки одного шага (доработка на этапе шага)."""
     parts = [f"Задача:\n{description}", f"Полный план:\n{plan}"]
@@ -214,7 +236,7 @@ def _step_revise_messages(
         {
             "role": "system",
             "content": _system_with_profile(
-                TASK_STEP_REVISE_SYSTEM_PROMPT, profile_block
+                TASK_STEP_REVISE_SYSTEM_PROMPT, profile_block, rules_frame
             ),
         },
         {"role": "user", "content": "\n\n".join(parts)},
@@ -357,6 +379,7 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
     opencode_session_id = request.app.state.opencode_session_id
     spec = _resolve_spec(registry, task, body.model, opencode_session_id)
     description = _task_description(task)
+    rules_frame = registry.rules_frame()
 
     if action == "describe":
         description = content
@@ -366,7 +389,9 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
             task.settings = sanitize_settings(body.settings)
         task.title = _task_title(content)
         task.add_user_message(content)
-        messages = _planner_messages(content, None, None, "", profile_block)
+        messages = _planner_messages(
+            content, None, None, "", profile_block, rules_frame=rules_frame
+        )
     elif action == "revise":
         task.add_user_message(content)
         old_steps = list(task.task_steps)
@@ -378,19 +403,22 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
         task.task_result = None
         messages = _planner_messages(
             description, task.task_plan, old_result, content, profile_block,
-            old_steps, old_results,
+            old_steps, old_results, rules_frame,
         )
     elif action == "run_all":
         task.task_steps = []
         task.task_step_results = []
         task.add_user_message("Выполни весь план.")
-        messages = _executor_messages(description, task.task_plan or "", profile_block)
+        messages = _executor_messages(
+            description, task.task_plan or "", profile_block, rules_frame
+        )
     elif action == "start_steps":
         task.task_steps = _parse_steps(task.task_plan or "") or ["Выполнить задачу."]
         task.task_step_results = []
         task.add_user_message(_step_marker(0))
         messages = _step_executor_messages(
-            description, task.task_plan or "", task.task_steps, [], 0, profile_block
+            description, task.task_plan or "", task.task_steps, [], 0,
+            profile_block, rules_frame,
         )
     elif action == "confirm_step":
         index = len(task.task_step_results)
@@ -402,6 +430,7 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
             task.task_step_results,
             index,
             profile_block,
+            rules_frame,
         )
     else:  # revise_step — переделываем текущий шаг (прогресс сохраняется)
         if not task.task_step_results:
@@ -419,6 +448,7 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
             index,
             content,
             profile_block,
+            rules_frame,
         )
 
     gen_settings = task.settings
@@ -440,7 +470,7 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
         yield _sse({"type": "session", "id": task_id})
         try:
             async for event in task.stream_completion(
-                runner, spec, gen_settings, messages=messages
+                runner, spec, gen_settings, messages=messages, prompt_kind=action
             ):
                 if event.get("type") == "done":
                     text = event.get("content") or ""
@@ -459,6 +489,7 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
                     for frame in drain_request_logs():
                         yield frame
                 yield _sse(event)
+            _collect_prompt_logs(registry, task, "Задача", task.title or "")
             registry.remember_pair(task)
             registry.persist_task_state(task)
             registry.persist_new_requests(task)

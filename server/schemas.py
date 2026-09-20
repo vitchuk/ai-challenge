@@ -42,6 +42,12 @@ class ProfilesSyncRequest(BaseModel):
     active_id: Optional[str] = None
 
 
+class RulesSyncRequest(BaseModel):
+    """Тело ``PUT /api/rules`` — полное состояние правил приложения."""
+
+    rules: list[dict[str, Any]] = []
+
+
 class TaskAdvanceRequest(BaseModel):
     """Тело ``POST /api/tasks/{id}/advance`` — действие протокола «Задачи»."""
 

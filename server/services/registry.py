@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import secrets
+import time
 from typing import Optional
 
 from ..config import Settings
@@ -18,9 +19,12 @@ from .chat_service import (
     PROFILE_FIELDS,
     PROFILE_MESSAGE_PREFIX,
     PROFILE_SYSTEM_PREFIX,
+    RULES_INSTRUCTION,
+    RULES_MESSAGE_PREFIX,
     ChatService,
     MessageRecord,
     Profile,
+    RuleStore,
     SessionKind,
 )
 from .storage import SessionStore
@@ -29,6 +33,9 @@ SUMMARY_CONTEXT_PROMPT = (
     "У тебя есть доступ к содержимому всех открытых чатов. "
     "Используй его при ответе на вопрос пользователя."
 )
+
+#: Сколько последних записей журнала промптов хранится в памяти.
+PROMPT_LOGS_LIMIT = 200
 
 
 class SessionRegistry:
@@ -46,6 +53,8 @@ class SessionRegistry:
         self._active_id: Optional[str] = None
         self._profiles: dict[str, Profile] = {}
         self._active_profile_id: Optional[str] = None
+        self._rules: list[RuleStore] = []
+        self._prompt_logs: list[dict] = []
         if self._store is not None:
             self._active_id = self._store.get_state("active_session")
             self._active_profile_id = self._store.get_state("active_profile")
@@ -95,6 +104,7 @@ class SessionRegistry:
         for service in loaded:
             self._sessions[service.id] = service
         self._profiles = {profile.id: profile for profile in self._store.load_profiles()}
+        self._rules = self._store.load_rules()
         return len(loaded)
 
     def close(self) -> None:
@@ -307,6 +317,77 @@ class SessionRegistry:
             for key, label in PROFILE_FIELDS
         )
         return f"{PROFILE_SYSTEM_PREFIX}\n\n{PROFILE_MESSAGE_PREFIX}\n{lines}"
+
+    def replace_rules(self, rules: list[RuleStore]) -> None:
+        """Полностью заменяет правила приложения (полный синк).
+
+        Args:
+            rules: новый полный список вкладок правил.
+        """
+        self._rules = list(rules)
+        if self._store is not None:
+            self._store.save_rules(self._rules)
+
+    def list_rules(self) -> list[RuleStore]:
+        """Возвращает список всех вкладок правил."""
+        return list(self._rules)
+
+    def rules_frame(self) -> Optional[str]:
+        """Собирает служебный блок правил (или ``None``, если правил нет).
+
+        Возвращает рамку ``[Правила]`` с секциями по вкладкам (``## {название}``
+        и строки ``ключ: значение``) и жёсткой инструкцией
+        :data:`RULES_INSTRUCTION`. Вкладки без непустых пар пропускаются.
+
+        Returns:
+            Текст служебного блока или ``None``.
+        """
+        sections = []
+        for rule in self._rules:
+            lines = "\n".join(
+                f"{item[0]}: {item[1]}"
+                for item in rule.items
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            )
+            if lines:
+                sections.append(f"## {rule.name}\n{lines}")
+        if not sections:
+            return None
+        return (
+            f"{RULES_MESSAGE_PREFIX}\n"
+            + "\n\n".join(sections)
+            + f"\n\n{RULES_INSTRUCTION}"
+        )
+
+    def add_prompt_logs(self, entries: list[dict], source: str = "", title: str = "") -> None:
+        """Добавляет записи журнала промптов (вкладка «Логи»).
+
+        Записи хранятся только в памяти (не персистятся) с ограничением
+        :data:`PROMPT_LOGS_LIMIT`; каждой проставляются источник, заголовок
+        чата/задачи и время.
+
+        Args:
+            entries: записи из ``ChatService.prompt_log_queue``.
+            source: метка источника («Чат», «Задачи», «Итоги», …).
+            title: заголовок чата/задачи (для контекста).
+        """
+        now = time.time()
+        for entry in entries:
+            record = dict(entry)
+            record["source"] = source
+            record["title"] = title
+            record["time"] = now
+            self._prompt_logs.append(record)
+        if len(self._prompt_logs) > PROMPT_LOGS_LIMIT:
+            self._prompt_logs = self._prompt_logs[-PROMPT_LOGS_LIMIT:]
+
+    def list_prompt_logs(self) -> list[dict]:
+        """Возвращает журнал промптов (сначала новые)."""
+        return list(reversed(self._prompt_logs))
+
+    def clear_prompt_logs(self) -> None:
+        """Очищает журнал промптов."""
+        self._prompt_logs = []
 
     def branch(self, chat: ChatService, title: Optional[str] = None) -> ChatService:
         """Создаёт чат-снапшот (ветку) от существующего чата.

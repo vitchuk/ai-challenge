@@ -5,6 +5,7 @@ from server.services.chat_service import (
     ChatService,
     MessageMeta,
     Profile,
+    RuleStore,
     SessionKind,
 )
 from server.services.generation import GenerationSettings
@@ -342,4 +343,37 @@ def test_task_state_persists_across_reopen(tmp_path):
     assert loaded.task_result is None
     assert loaded.task_steps == ["Шаг один", "Шаг два"]
     assert loaded.task_step_results == ["результат 1"]
+    store2.close()
+
+
+# ── Правила приложения ──────────────────────────────────────────────────────
+
+def test_rules_roundtrip(tmp_path):
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    store.save_rules([
+        RuleStore(id="rl-1", name="Безопасность", items=[["K1", "V1"]]),
+        RuleStore(id="rl-2", name="Тон", items=[["K2", "V2"], ["K3", "V3"]]),
+    ])
+
+    loaded = store.load_rules()
+    assert [r.id for r in loaded] == ["rl-1", "rl-2"]
+    assert loaded[0].name == "Безопасность"
+    assert loaded[0].items == [["K1", "V1"]]
+    assert loaded[1].items == [["K2", "V2"], ["K3", "V3"]]
+    store.close()
+
+
+def test_rules_full_replace_and_persist_across_reopen(tmp_path):
+    db = str(tmp_path / "test.db")
+    store = SessionStore(db)
+    store.save_rules([RuleStore(id="a", name="A", items=[["k", "v"]])])
+    store.save_rules([RuleStore(id="b", name="B", items=[["x", "y"]])])
+    assert [r.id for r in store.load_rules()] == ["b"]
+    store.close()
+
+    store2 = SessionStore(db)
+    loaded = store2.load_rules()
+    assert [r.id for r in loaded] == ["b"]
+    assert loaded[0].items == [["x", "y"]]
     store2.close()

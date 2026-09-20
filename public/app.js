@@ -45,6 +45,19 @@ const profileTabList = document.getElementById('profile-tab-list');
 const profileNewName = document.getElementById('profile-new-name');
 const profileAdd = document.getElementById('profile-add');
 const profileEditor = document.getElementById('profile-editor');
+const viewTabRules = document.getElementById('view-tab-rules');
+const rulesView = document.getElementById('rules-view');
+const rulesTabList = document.getElementById('rules-tab-list');
+const rulesNewName = document.getElementById('rules-new-name');
+const rulesAdd = document.getElementById('rules-add');
+const rulesEditor = document.getElementById('rules-editor');
+const viewTabLogs = document.getElementById('view-tab-logs');
+const viewTabLogsIcon = document.getElementById('view-tab-logs-icon');
+const logsView = document.getElementById('logs-view');
+const logsList = document.getElementById('logs-list');
+const logsCount = document.getElementById('logs-count');
+const logsRefresh = document.getElementById('logs-refresh');
+const logsClear = document.getElementById('logs-clear');
 const viewTabTasks = document.getElementById('view-tab-tasks');
 const tasksView = document.getElementById('tasks-view');
 const tasksTabList = document.getElementById('tasks-tab-list');
@@ -197,6 +210,12 @@ function setProfileActive(profileId) {
   saveUiState();
 }
 
+function setRulesActive(storeId) {
+  activeRulesId = storeId;
+  uiState.inner.rules = storeId;
+  saveUiState();
+}
+
 function setTaskActive(task) {
   if (!task) return;
   activeTaskId = task.id;
@@ -237,6 +256,25 @@ const CHECK_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
   'stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
   '<path d="M5 13l4 4L19 7"/></svg>';
+
+// Иконка «терминал» — для кнопки-вида «Логи промптов».
+const LOGS_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
+
+// Метки типов запросов в журнале промптов.
+const LOG_KIND_LABELS = {
+  main: 'запрос',
+  summary: 'саммаризация',
+  facts: 'факты',
+  describe: 'план',
+  revise: 'новый план',
+  run_all: 'выполнение',
+  start_steps: 'шаг',
+  confirm_step: 'шаг',
+  revise_step: 'правка шага'
+};
 
 // Обязательные поля профиля пользователя (ключ — как на сервере).
 const PROFILE_FIELDS = [
@@ -284,6 +322,11 @@ let profileActiveId = null;
 let tasks = [];
 let activeTaskId = null;
 let taskCounter = 0;
+// Правила (глобальные ограничения): список вкладок и выбранная вкладка UI.
+let rules = [];
+let activeRulesId = null;
+// Журнал промптов (вкладка «Логи»): записи с сервера (в памяти сервера).
+let promptLogs = [];
 
 // ── Базовые UI-утилиты ─────────────────────────────────────────────────────
 function renderTotal() {
@@ -907,6 +950,7 @@ function activateChat(chat) {
   updateChatLayout();
   if (activeView === 'memory') renderMemoryView();
   if (activeView === 'profile') renderProfileView();
+  if (activeView === 'rules') renderRulesView();
   // Сообщаем серверу, какая вкладка открыта (для восстановления после рестарта).
   if (chat.sid) {
     apiActivateSession(chat.sid).catch((err) => {
@@ -978,7 +1022,7 @@ function updateChatLayout() {
   }
 }
 
-// ── Виды основной области: Чат / Задачи / Память / Профиль ─────────────────
+// ── Виды: Чат / Задачи / Память / Правила / Профиль / Логи ─────────────────
 function switchView(view) {
   activeView =
     view === 'memory'
@@ -987,10 +1031,16 @@ function switchView(view) {
         ? 'profile'
         : view === 'tasks'
           ? 'tasks'
-          : 'chat';
+          : view === 'rules'
+            ? 'rules'
+            : view === 'logs'
+              ? 'logs'
+              : 'chat';
   const isMemory = activeView === 'memory';
   const isProfile = activeView === 'profile';
   const isTasks = activeView === 'tasks';
+  const isRules = activeView === 'rules';
+  const isLogs = activeView === 'logs';
   uiState.view = activeView;
   saveUiState();
   if (viewTabChat) {
@@ -1002,17 +1052,27 @@ function switchView(view) {
   if (viewTabMemory) {
     viewTabMemory.classList.toggle('chat__view-tab--active', isMemory);
   }
+  if (viewTabRules) {
+    viewTabRules.classList.toggle('chat__view-tab--active', isRules);
+  }
   if (viewTabProfile) {
     viewTabProfile.classList.toggle('chat__view-tab--active', isProfile);
   }
-  if (chatMain) chatMain.hidden = isMemory || isProfile || isTasks;
+  if (viewTabLogs) {
+    viewTabLogs.classList.toggle('chat__view-tab--active', isLogs);
+  }
+  if (chatMain) chatMain.hidden = isMemory || isProfile || isTasks || isRules || isLogs;
   if (memoryView) memoryView.hidden = !isMemory;
   if (profileView) profileView.hidden = !isProfile;
   if (tasksView) tasksView.hidden = !isTasks;
+  if (rulesView) rulesView.hidden = !isRules;
+  if (logsView) logsView.hidden = !isLogs;
   updateChatLayout();
   if (isMemory) renderMemoryView();
   if (isProfile) renderProfileView();
   if (isTasks) renderTasksView();
+  if (isRules) renderRulesView();
+  if (isLogs) loadLogs();
 }
 
 function activeMemoryStore(chat) {
@@ -1195,6 +1255,324 @@ async function syncMemory(chat) {
     logClient('receive', `PUT /api/sessions/${chat.sid}/memory → ${res.status}`);
   } catch (err) {
     logClient('receive', `PUT /api/sessions/${chat.sid}/memory — ошибка`, err.message);
+  }
+}
+
+// ── Правила (глобальные ограничения; механика как у «Памяти») ──────────────
+function activeRulesStore() {
+  return rules.find((s) => s.id === activeRulesId) || rules[0] || null;
+}
+
+function renderRulesView() {
+  if (!rulesView || !rulesTabList || !rulesEditor) return;
+  rulesTabList.innerHTML = '';
+  for (const store of rules) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className =
+      'memory__tab' + (activeRulesStore() === store ? ' memory__tab--active' : '');
+    tab.title = store.name;
+    const name = document.createElement('span');
+    name.className = 'memory__tab-name';
+    name.textContent = store.name;
+    const close = document.createElement('span');
+    close.className = 'memory__tab-close';
+    close.textContent = '×';
+    close.title = 'Удалить вкладку';
+    close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteRulesStore(store.id);
+    });
+    tab.append(name, close);
+    tab.addEventListener('click', () => {
+      setRulesActive(store.id);
+      renderRulesView();
+    });
+    rulesTabList.appendChild(tab);
+  }
+  renderRulesEditor(activeRulesStore());
+}
+
+function renderRulesEditor(store) {
+  rulesEditor.innerHTML = '';
+  if (!store) {
+    const empty = document.createElement('div');
+    empty.className = 'memory__empty';
+    empty.textContent =
+      'Создайте вкладку правил: укажите название и нажмите «+». Правила действуют во всех чатах и задачах.';
+    rulesEditor.appendChild(empty);
+    return;
+  }
+
+  const form = document.createElement('div');
+  form.className = 'memory__form';
+  const keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.id = 'rules-key';
+  keyInput.className = 'memory__input';
+  keyInput.placeholder = 'Ключ';
+  const valueInput = document.createElement('input');
+  valueInput.type = 'text';
+  valueInput.id = 'rules-value';
+  valueInput.className = 'memory__input';
+  valueInput.placeholder = 'Значение';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'memory__save';
+  saveBtn.textContent = 'Сохранить';
+  const submit = () => saveRulesItem(store, keyInput, valueInput);
+  saveBtn.addEventListener('click', submit);
+  for (const el of [keyInput, valueInput]) {
+    el.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
+    });
+  }
+  form.append(keyInput, valueInput, saveBtn);
+  rulesEditor.appendChild(form);
+
+  const items = document.createElement('div');
+  items.className = 'memory__items';
+  store.items.forEach((item, index) => {
+    const row = document.createElement('div');
+    row.className = 'memory__item';
+    const text = document.createElement('span');
+    text.className = 'memory__item-text';
+    const key = document.createElement('span');
+    key.className = 'memory__item-key';
+    key.textContent = `${item[0]}:`;
+    text.append(key, document.createTextNode(` ${item[1]}`));
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'memory__item-del';
+    del.textContent = 'удалить';
+    del.addEventListener('click', () => deleteRulesItem(store, index));
+    row.append(text, del);
+    items.appendChild(row);
+  });
+  rulesEditor.appendChild(items);
+}
+
+function createRulesStore() {
+  const name =
+    (rulesNewName ? rulesNewName.value.trim() : '') || `Правила ${rules.length + 1}`;
+  const store = {
+    id: `rl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name,
+    items: []
+  };
+  rules.push(store);
+  setRulesActive(store.id);
+  if (rulesNewName) rulesNewName.value = '';
+  syncRules();
+  renderRulesView();
+  if (rulesNewName) rulesNewName.focus();
+}
+
+function deleteRulesStore(storeId) {
+  const store = rules.find((s) => s.id === storeId);
+  if (store && !confirm(`Удалить вкладку правил «${store.name}»?`)) return;
+  rules = rules.filter((s) => s.id !== storeId);
+  if (activeRulesId === storeId) {
+    setRulesActive(rules.length ? rules[0].id : null);
+  }
+  syncRules();
+  renderRulesView();
+}
+
+function saveRulesItem(store, keyInput, valueInput) {
+  const key = (keyInput.value || '').trim();
+  const value = (valueInput.value || '').trim();
+  if (!key || !value) return;
+  store.items.push([key, value]);
+  keyInput.value = '';
+  valueInput.value = '';
+  syncRules();
+  renderRulesEditor(store);
+  const next = rulesEditor.querySelector('#rules-key');
+  if (next) next.focus();
+}
+
+function deleteRulesItem(store, index) {
+  store.items.splice(index, 1);
+  syncRules();
+  renderRulesView();
+}
+
+async function syncRules() {
+  try {
+    logClient('send', 'PUT /api/rules', { rules });
+    const res = await fetch('/api/rules', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Ошибка ${res.status}`);
+    }
+    logClient('receive', `PUT /api/rules → ${res.status}`);
+  } catch (err) {
+    logClient('receive', 'PUT /api/rules — ошибка', err.message);
+  }
+}
+
+async function loadRules() {
+  try {
+    logClient('send', 'GET /api/rules');
+    const res = await fetch('/api/rules');
+    if (!res.ok) throw new Error(`Ошибка ${res.status}`);
+    const data = await res.json();
+    rules = (Array.isArray(data.rules) ? data.rules : [])
+      .filter((s) => s && typeof s.id === 'string')
+      .map((s) => ({
+        id: s.id,
+        name: typeof s.name === 'string' ? s.name : '',
+        items: Array.isArray(s.items) ? s.items.map((item) => [...item]) : []
+      }));
+    logClient('receive', `GET /api/rules → ${rules.length}`, data);
+  } catch (err) {
+    logClient('receive', 'GET /api/rules — ошибка', err.message);
+  }
+}
+
+// ── Логи промптов (вкладка «Логи»; журнал в памяти сервера) ────────────────
+async function loadLogs() {
+  try {
+    logClient('send', 'GET /api/logs');
+    const res = await fetch('/api/logs');
+    if (!res.ok) throw new Error(`Ошибка ${res.status}`);
+    const data = await res.json();
+    promptLogs = Array.isArray(data.logs) ? data.logs : [];
+    logClient('receive', `GET /api/logs → ${promptLogs.length}`, data);
+  } catch (err) {
+    logClient('receive', 'GET /api/logs — ошибка', err.message);
+  }
+  if (activeView === 'logs') renderLogsView();
+}
+
+async function clearLogs() {
+  if (!confirm('Очистить журнал промптов?')) return;
+  try {
+    logClient('send', 'DELETE /api/logs');
+    const res = await fetch('/api/logs', { method: 'DELETE' });
+    logClient('receive', `DELETE /api/logs → ${res.status}`);
+  } catch (err) {
+    logClient('receive', 'DELETE /api/logs — ошибка', err.message);
+  }
+  promptLogs = [];
+  renderLogsView();
+}
+
+function formatLogTime(ts) {
+  if (typeof ts !== 'number' || ts <= 0) return '';
+  try {
+    return new Date(ts * 1000).toLocaleTimeString('ru-RU');
+  } catch {
+    return '';
+  }
+}
+
+function renderLogEntry(entry) {
+  const card = document.createElement('div');
+  card.className = 'logs__entry';
+
+  const meta = document.createElement('div');
+  meta.className = 'logs__meta';
+  const time = document.createElement('span');
+  time.className = 'logs__time';
+  time.textContent = formatLogTime(entry.time);
+  const source = document.createElement('span');
+  source.className = 'logs__badge logs__badge--source';
+  source.textContent = entry.source || '—';
+  const kind = document.createElement('span');
+  kind.className = 'logs__badge logs__badge--kind';
+  kind.textContent = LOG_KIND_LABELS[entry.kind] || entry.kind || '';
+  const model = document.createElement('span');
+  model.className = 'logs__model';
+  model.textContent = entry.model || '';
+  const tokens = document.createElement('span');
+  tokens.className = 'logs__tokens';
+  tokens.textContent =
+    `вход: ${formatTokens(entry.prompt_tokens)} · выход: ${formatTokens(entry.completion_tokens)}`;
+  meta.append(time, source, kind, model, tokens);
+  if (entry.title) {
+    const title = document.createElement('span');
+    title.className = 'logs__title-inline';
+    title.textContent = entry.title;
+    title.title = entry.title;
+    meta.appendChild(title);
+  }
+  card.appendChild(meta);
+
+  const messages = Array.isArray(entry.messages) ? entry.messages : [];
+  let userText = '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i] && messages[i].role === 'user') {
+      userText = messages[i].content || '';
+      break;
+    }
+  }
+  if (userText) {
+    const block = document.createElement('div');
+    block.className = 'logs__user';
+    const label = document.createElement('div');
+    label.className = 'logs__label';
+    label.textContent = 'Запрос пользователя';
+    const text = document.createElement('div');
+    text.className = 'logs__text';
+    text.textContent = userText;
+    block.append(label, text);
+    card.appendChild(block);
+  }
+
+  const details = document.createElement('details');
+  details.className = 'logs__prompt';
+  const summary = document.createElement('summary');
+  summary.textContent = `Итоговый промпт (${messages.length} сообщ.)`;
+  details.appendChild(summary);
+  for (const message of messages) {
+    const row = document.createElement('div');
+    row.className = 'logs__msg';
+    const role = document.createElement('span');
+    role.className = `logs__msg-role logs__msg-role--${message.role || ''}`;
+    role.textContent = message.role || '';
+    const text = document.createElement('span');
+    text.className = 'logs__msg-text';
+    text.textContent = message.content || '';
+    row.append(role, text);
+    details.appendChild(row);
+  }
+  card.appendChild(details);
+
+  const response = document.createElement('div');
+  response.className = 'logs__response';
+  const rlabel = document.createElement('div');
+  rlabel.className = 'logs__label';
+  rlabel.textContent = 'Ответ LLM';
+  const rtext = document.createElement('div');
+  rtext.className = 'logs__text';
+  rtext.textContent = entry.response || '(пустой ответ)';
+  response.append(rlabel, rtext);
+  card.appendChild(response);
+  return card;
+}
+
+function renderLogsView() {
+  if (!logsView || !logsList) return;
+  if (logsCount) logsCount.textContent = promptLogs.length ? String(promptLogs.length) : '';
+  logsList.innerHTML = '';
+  if (!promptLogs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'logs__empty';
+    empty.textContent = 'Логов пока нет.';
+    logsList.appendChild(empty);
+    return;
+  }
+  for (const entry of promptLogs) {
+    logsList.appendChild(renderLogEntry(entry));
   }
 }
 
@@ -3091,6 +3469,35 @@ if (tasksAdd) {
   tasksAdd.addEventListener('click', createTask);
 }
 
+if (viewTabRules) {
+  viewTabRules.addEventListener('click', () => switchView('rules'));
+}
+
+if (rulesAdd) {
+  rulesAdd.addEventListener('click', createRulesStore);
+}
+
+if (rulesNewName) {
+  rulesNewName.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      createRulesStore();
+    }
+  });
+}
+
+if (viewTabLogs) {
+  viewTabLogs.addEventListener('click', () => switchView('logs'));
+}
+
+if (logsRefresh) {
+  logsRefresh.addEventListener('click', loadLogs);
+}
+
+if (logsClear) {
+  logsClear.addEventListener('click', clearLogs);
+}
+
 if (chartColorToggle) {
   chartColorToggle.checked = chartColorMode;
   chartColorToggle.addEventListener('change', () => {
@@ -3174,6 +3581,7 @@ renderTotal();
 applyChartCollapsed();
 renderChart();
 if (viewTabProfileIcon) viewTabProfileIcon.innerHTML = PROFILE_ICON_SVG;
+if (viewTabLogsIcon) viewTabLogsIcon.innerHTML = LOGS_ICON_SVG;
 loadUiState();
 loadModels();
 
@@ -3241,6 +3649,12 @@ function applySavedView() {
   }
   const savedTask = tasks.find((t) => t.sid === uiState.inner.task);
   if (savedTask) activeTaskId = savedTask.id;
+  if (
+    uiState.inner.rules &&
+    rules.some((s) => s.id === uiState.inner.rules)
+  ) {
+    activeRulesId = uiState.inner.rules;
+  }
 
   const chat = getActiveChat();
   const storeId =
@@ -3251,7 +3665,7 @@ function applySavedView() {
     chat.memoryActiveId = storeId;
   }
 
-  const known = ['chat', 'tasks', 'memory', 'profile'];
+  const known = ['chat', 'tasks', 'memory', 'rules', 'profile', 'logs'];
   switchView(known.includes(uiState.view) ? uiState.view : 'chat');
 }
 
@@ -3262,6 +3676,8 @@ function applySavedView() {
   await loadProfiles();
   // Задачи (протокол этапов) — тоже глобальные; восстанавливаем вкладки.
   await loadTasks();
+  // Правила — глобальные, нужны для подмешивания в запросы.
+  await loadRules();
   try {
     const restored = await restoreSessions();
     restoredSessions = restored.sessions;

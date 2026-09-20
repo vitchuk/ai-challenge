@@ -10,8 +10,10 @@ import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from .api.logs import router as logs_router
 from .api.models import router as models_router
 from .api.profiles import router as profiles_router
+from .api.rules import router as rules_router
 from .api.sessions import router as sessions_router
 from .api.tasks import router as tasks_router
 from .config import Settings, get_settings
@@ -73,6 +75,8 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(models_router)
     app.include_router(profiles_router)
+    app.include_router(rules_router)
+    app.include_router(logs_router)
     app.include_router(tasks_router)
     app.mount("/", StaticFiles(directory=PUBLIC_DIR, html=True), name="static")
     return app

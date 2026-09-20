@@ -21,6 +21,7 @@ from .chat_service import (
     MessageRecord,
     Profile,
     RequestRecord,
+    RuleStore,
     SessionKind,
 )
 from .generation import GenerationSettings
@@ -93,6 +94,13 @@ CREATE TABLE IF NOT EXISTS profiles (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     fields      TEXT NOT NULL DEFAULT '{}',
+    updated_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_rules (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    items       TEXT NOT NULL DEFAULT '[]',
     updated_at  REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS app_state (
@@ -412,6 +420,46 @@ class SessionStore:
                     "id": row["id"],
                     "name": row["name"],
                     "fields": json.loads(row["fields"] or "{}"),
+                }
+            )
+            for row in rows
+        ]
+
+    def save_rules(self, rules: list[RuleStore]) -> None:
+        """Перезаписывает все правила (полный синк, глобально на приложение).
+
+        Args:
+            rules: полный список вкладок правил.
+        """
+        with self._conn:
+            self._conn.execute("DELETE FROM app_rules")
+            for rule in rules:
+                self._conn.execute(
+                    "INSERT INTO app_rules (id, name, items, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        rule.id,
+                        rule.name,
+                        json.dumps(rule.to_dict()["items"], ensure_ascii=False),
+                        time.time(),
+                    ),
+                )
+
+    def load_rules(self) -> list[RuleStore]:
+        """Загружает все правила из БД.
+
+        Returns:
+            Список :class:`RuleStore` в порядке сохранения.
+        """
+        rows = self._conn.execute(
+            "SELECT id, name, items FROM app_rules ORDER BY updated_at, id"
+        ).fetchall()
+        return [
+            RuleStore.from_dict(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "items": json.loads(row["items"] or "[]"),
                 }
             )
             for row in rows
