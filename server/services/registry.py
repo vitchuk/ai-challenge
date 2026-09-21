@@ -191,6 +191,22 @@ class SessionRegistry:
         self._store.save_session(chat)
         self._store.append_pair(chat.id, first_record, assistant_record)
 
+    def remember_assistant(self, chat: ChatService) -> None:
+        """Персистит последнее сообщение ассистента без пары (шаг run_all).
+
+        Используется, когда шаги выполняются подряд и в истории нет
+        пользовательских реплик между ответами (режим «выполнить всё сразу»).
+
+        Args:
+            chat: сессия, в конец истории которой только что добавлен ответ.
+        """
+        if self._store is None or chat.kind == SessionKind.EPHEMERAL:
+            return
+        if not chat.history or chat.history[-1].role != "assistant":
+            return
+        self._store.save_session(chat)
+        self._store.append_message(chat.id, chat.history[-1])
+
     def persist_new_requests(self, chat: ChatService) -> None:
         """Персистит ещё не сохранённые записи о запросах к LLM.
 

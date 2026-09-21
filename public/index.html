@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Помогатор2К</title>
-  <link rel="stylesheet" href="style.css?v=23" />
+  <link rel="stylesheet" href="style.css?v=31" />
 </head>
 <body>
   <div class="app">
@@ -125,7 +125,10 @@
             </button>
           </div>
         </div>
-        <div id="task-messages" class="chat__body"></div>
+        <div id="task-messages" class="tasks__body">
+          <aside id="task-rail" class="tasks__rail" hidden></aside>
+          <div id="task-messages-area" class="chat__body"></div>
+        </div>
         <div id="task-actions" class="tasks__actions"></div>
       </section>
 
@@ -406,6 +409,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=23"></script>
+  <script src="app.js?v=31"></script>
 </body>
 </html>

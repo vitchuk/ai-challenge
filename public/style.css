@@ -1949,6 +1949,197 @@ body {
   padding: 12px 16px 0;
 }
 
+/* Окно задачи: слева вертикальная рельса шагов, справа — сообщения. */
+.tasks__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.tasks__rail {
+  flex: none;
+  width: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 12px;
+  border-right: 1px solid var(--border);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.tasks__rail::-webkit-scrollbar {
+  width: 8px;
+}
+
+.tasks__rail::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tasks__rail::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 4px;
+}
+
+.tasks__rail::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 140, 255, 0.7);
+}
+
+/* Шаг в режиме «выполнить всё сразу»: подпись + ответ ассистента. */
+.tasks__step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tasks__step-label {
+  padding-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.tasks__node {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+  text-align: left;
+}
+
+.tasks__node--clickable {
+  cursor: pointer;
+}
+
+.tasks__node--clickable:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tasks__node-marker {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tasks__node--done .tasks__node-marker {
+  border-color: #4caf7d;
+  color: #4caf7d;
+}
+
+.tasks__node--active .tasks__node-marker {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 10px rgba(79, 140, 255, 0.5);
+}
+
+.tasks__node-label {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tasks__node--active .tasks__node-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tasks__node-step .tasks__node-num {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.tasks__node--active .tasks__node-step .tasks__node-num {
+  color: var(--accent);
+}
+
+.tasks__node-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(79, 140, 255, 0.25);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: reasoning-spin 0.8s linear infinite;
+}
+
+/* Инлайн-редактор шага в рельсе. */
+.tasks__node-edit {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tasks__node-edit-input {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  resize: vertical;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.tasks__node-edit-input::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tasks__node-edit-input::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 3px;
+}
+
+.tasks__node-edit-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.tasks__node-edit-btn {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tasks__node-edit-btn--save {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tasks__node-edit-btn:hover {
+  box-shadow: 0 0 8px rgba(79, 140, 255, 0.25);
+}
+
 .tasks__actions {
   flex: none;
   display: flex;

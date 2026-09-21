@@ -26,7 +26,6 @@ from ..providers.client import StreamedCompletion
 from ..schemas import TaskAdvanceRequest
 from ..services import ChatService, SessionKind, sanitize_settings
 from ..services.chat_service import (
-    TASK_EXECUTOR_SYSTEM_PROMPT,
     TASK_PLANNER_SYSTEM_PROMPT,
     TASK_STEP_EXECUTOR_SYSTEM_PROMPT,
     TASK_STEP_REVISE_SYSTEM_PROMPT,
@@ -45,16 +44,17 @@ _ACTIONS = {
     "start_steps",
     "confirm_step",
     "revise_step",
+    "edit_step",
     "approve",
 }
 
 #: Какие действия разрешены на каждом этапе.
 _ALLOWED_ACTIONS: dict[str, set[str]] = {
     "input": {"describe"},
-    "plan_review": {"confirm", "revise"},
-    "mode_select": {"run_all", "start_steps"},
-    "step_review": {"confirm_step", "revise_step"},
-    "review": {"approve", "revise"},
+    "plan_review": {"confirm", "revise", "edit_step"},
+    "mode_select": {"run_all", "start_steps", "edit_step"},
+    "step_review": {"confirm_step", "revise_step", "edit_step"},
+    "review": {"approve", "revise", "edit_step"},
     "done": set(),
 }
 
@@ -134,6 +134,91 @@ def _combine_step_result(steps: list[str], results: list[str]) -> str:
     return _completed_steps_block(steps, results)
 
 
+def _plan_from_steps(steps: list[str]) -> str:
+    """Пересобирает текст плана из отредактированных пользователем шагов."""
+    return "\n".join(f"{i + 1}. {step}" for i, step in enumerate(steps))
+
+
+def _same_meaning(a: str, b: str) -> bool:
+    """Совпадают ли строки по смыслу (без учёта пробелов/переносов)."""
+    return " ".join(a.split()) == " ".join(b.split())
+
+
+#: Глаголы перехода по шагам — маршрутизация замечаний в ``revise_step``.
+_STEP_TRANSITION_RE = re.compile(
+    r"верн|назад|перейд|переход|повтор|заново|начни|отмени", re.IGNORECASE
+)
+_STEP_REF_DIGIT_RE = re.compile(
+    r"(?:шаг|этап)[а-яё]*\s*№?\s*(\d{1,2})|(\d{1,2})\s*[-–]?\s*[йя]\s*(?:шаг|этап)",
+    re.IGNORECASE,
+)
+_STEP_WORD_NUMBERS = {
+    "перв": 1, "втор": 2, "трет": 3, "четв": 4, "пят": 5,
+    "шест": 6, "седьм": 7, "восьм": 8, "девят": 9, "десят": 10,
+}
+
+
+def _parse_step_directive(content: str, current: int, total: int) -> Optional[int]:
+    """Определяет явную просьбу перейти к шагу в замечаниях пользователя.
+
+    Учитывается только при наличии глагола перехода (вернись/перейди/повтори/
+    назад/…), иначе замечание считается обычной доработкой текущего шага.
+
+    Args:
+        content: текст замечаний.
+        current: номер текущего шага (1-based).
+        total: всего шагов в плане.
+
+    Returns:
+        Номер целевого шага (1-based) или ``None``, если перехода нет.
+    """
+    text = content.lower()
+    if not _STEP_TRANSITION_RE.search(text):
+        return None
+    match = _STEP_REF_DIGIT_RE.search(text)
+    if match:
+        return int(match.group(1) or match.group(2))
+    if "предыдущ" in text or "назад" in text:
+        return current - 1
+    if "следующ" in text or "дальше" in text or "далее" in text:
+        return current + 1
+    if "последн" in text:
+        return total
+    if "шаг" in text or "этап" in text:
+        for stem, number in _STEP_WORD_NUMBERS.items():
+            if stem in text:
+                return number
+    return None
+
+
+def _parse_step_reference(content: str, total: int) -> Optional[int]:
+    """Извлекает явную ссылку на шаг плана в замечаниях (без глагола).
+
+    Используется на этапе валидации (``review``): замечание с указанием шага
+    (номер, слово-число, «последний») трактуется как точечная доработка этого
+    шага. Относительные фразы («предыдущий»/«следующий»/«назад») не
+    распознаются — они неоднозначны вне пошагового режима.
+
+    Args:
+        content: текст замечаний.
+        total: всего шагов в плане.
+
+    Returns:
+        Номер целевого шага (1-based) или ``None``, если ссылки нет.
+    """
+    text = content.lower()
+    match = _STEP_REF_DIGIT_RE.search(text)
+    if match:
+        return int(match.group(1) or match.group(2))
+    if "последн" in text and ("шаг" in text or "этап" in text):
+        return total
+    if "шаг" in text or "этап" in text:
+        for stem, number in _STEP_WORD_NUMBERS.items():
+            if stem in text:
+                return number
+    return None
+
+
 def _planner_messages(
     description: str,
     plan: Optional[str],
@@ -166,24 +251,6 @@ def _planner_messages(
     ]
 
 
-def _executor_messages(
-    description: str,
-    plan: str,
-    profile_block: Optional[str],
-    rules_frame: Optional[str] = None,
-) -> list[dict]:
-    """Сообщения запроса исполнителя (выполнение всего плана)."""
-    return [
-        {
-            "role": "system",
-            "content": _system_with_profile(
-                TASK_EXECUTOR_SYSTEM_PROMPT, profile_block, rules_frame
-            ),
-        },
-        {"role": "user", "content": f"Задача:\n{description}\n\nПодтверждённый план:\n{plan}"},
-    ]
-
-
 def _step_executor_messages(
     description: str,
     plan: str,
@@ -192,6 +259,7 @@ def _step_executor_messages(
     index: int,
     profile_block: Optional[str],
     rules_frame: Optional[str] = None,
+    directive: Optional[str] = None,
 ) -> list[dict]:
     """Сообщения запроса исполнителя одного шага (пошаговый режим)."""
     parts = [f"Задача:\n{description}", f"Полный план:\n{plan}"]
@@ -200,6 +268,8 @@ def _step_executor_messages(
     else:
         parts.append("Выполненные шаги: (пока нет)")
     parts.append(f"Выполни шаг {index + 1}: {steps[index]}")
+    if directive:
+        parts.append(f"Указание пользователя: {directive}")
     return [
         {
             "role": "system",
@@ -344,8 +414,33 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
         )
 
     content = (body.content or "").strip()
-    if action in ("describe", "revise", "revise_step") and not content:
+    if action in ("describe", "revise", "revise_step", "edit_step") and not content:
         raise HTTPException(400, "content is required")
+
+    # Прямая правка шага плана пользователем. Без отката — действие без LLM;
+    # если правится уже выполненный шаг — прогресс откатывается и шаг
+    # запускается заново (см. ветку edit_step ниже).
+    run_index: Optional[int] = None
+    rollback_backup: Optional[tuple[list[str], Optional[str]]] = None
+    rework_index: Optional[int] = None
+    if action == "edit_step":
+        index = body.index
+        if index is None or not isinstance(index, int) or not (0 <= index < len(task.task_steps)):
+            raise HTTPException(400, "index is out of range")
+        if _same_meaning(content, task.task_steps[index]):
+            # Изменились только пробелы — смысл тот же, ничего не делаем.
+            return _progress(task)
+        task.task_steps[index] = content
+        task.task_plan = _plan_from_steps(task.task_steps)
+        if index < len(task.task_step_results):
+            # Правка выполненного шага: результаты с этого шага недействительны.
+            rollback_backup = (list(task.task_step_results), task.task_result)
+            task.task_step_results = task.task_step_results[:index]
+            task.task_result = None
+            run_index = index
+        else:
+            registry.persist_task_state(task)
+            return _progress(task)
 
     # Действия без обращения к LLM (профиль не нужен).
     if action == "confirm":
@@ -393,27 +488,53 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
             content, None, None, "", profile_block, rules_frame=rules_frame
         )
     elif action == "revise":
-        task.add_user_message(content)
-        old_steps = list(task.task_steps)
-        old_results = list(task.task_step_results)
-        old_result = task.task_result
-        # Новый план делает прежнее выполнение недействительным.
-        task.task_steps = []
-        task.task_step_results = []
-        task.task_result = None
-        messages = _planner_messages(
-            description, task.task_plan, old_result, content, profile_block,
-            old_steps, old_results, rules_frame,
-        )
+        # На валидации замечание с явной ссылкой на шаг правит только этот шаг
+        # (остальные результаты сохраняются, возврат на review).
+        if stage == "review" and len(task.task_step_results) == len(task.task_steps):
+            target = _parse_step_reference(content, len(task.task_steps))
+            if target is not None:
+                if not (1 <= target <= len(task.task_steps)):
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": f"Шага {target} нет в плане (всего {len(task.task_steps)})."
+                        },
+                    )
+                rework_index = target - 1
+        if rework_index is not None:
+            task.add_user_message(content)
+            messages = _step_revise_messages(
+                description,
+                task.task_plan or "",
+                task.task_steps,
+                task.task_step_results,
+                rework_index,
+                content,
+                profile_block,
+                rules_frame,
+            )
+        else:
+            task.add_user_message(content)
+            old_steps = list(task.task_steps)
+            old_results = list(task.task_step_results)
+            old_result = task.task_result
+            # Новый план делает прежнее выполнение недействительным.
+            task.task_steps = []
+            task.task_step_results = []
+            task.task_result = None
+            messages = _planner_messages(
+                description, task.task_plan, old_result, content, profile_block,
+                old_steps, old_results, rules_frame,
+            )
     elif action == "run_all":
-        task.task_steps = []
+        # Выполняем весь план пошагово (по одному запросу на шаг), без пауз.
+        if not task.task_steps:
+            task.task_steps = _parse_steps(task.task_plan or "") or ["Выполнить задачу."]
         task.task_step_results = []
-        task.add_user_message("Выполни весь план.")
-        messages = _executor_messages(
-            description, task.task_plan or "", profile_block, rules_frame
-        )
+        messages = None
     elif action == "start_steps":
-        task.task_steps = _parse_steps(task.task_plan or "") or ["Выполнить задачу."]
+        if not task.task_steps:
+            task.task_steps = _parse_steps(task.task_plan or "") or ["Выполнить задачу."]
         task.task_step_results = []
         task.add_user_message(_step_marker(0))
         messages = _step_executor_messages(
@@ -432,24 +553,90 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
             profile_block,
             rules_frame,
         )
-    else:  # revise_step — переделываем текущий шаг (прогресс сохраняется)
-        if not task.task_step_results:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "Нет шага для доработки", "stage": stage},
-            )
-        index = len(task.task_step_results) - 1
-        task.add_user_message(content)
-        messages = _step_revise_messages(
+    elif action == "edit_step":
+        # Откат прогресса до правленного шага + его повторное выполнение.
+        index = run_index if run_index is not None else 0
+        task.add_user_message(_step_marker(index))
+        messages = _step_executor_messages(
             description,
             task.task_plan or "",
             task.task_steps,
             task.task_step_results,
             index,
-            content,
             profile_block,
             rules_frame,
         )
+    else:  # revise_step — доработка текущего шага или явный переход по замечаниям
+        if not task.task_step_results:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Нет шага для доработки", "stage": stage},
+            )
+        current = len(task.task_step_results)  # 1-based: шаг на подтверждении
+        total = len(task.task_steps)
+        target = _parse_step_directive(content, current, total)
+        if target is not None and target != current:
+            if target < 1:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"Шага {target} нет в плане (всего {total})."},
+                )
+            if target > total:
+                if target == current + 1:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": "Это последний шаг — подтвердите его для завершения.",
+                            "code": "no_next_step",
+                        },
+                    )
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"Шага {target} нет в плане (всего {total})."},
+                )
+            if target > current + 1:
+                # Пропуск нескольких шагов вперёд запрещён.
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": (
+                            f"Переход вперёд через несколько шагов запрещён: со шага "
+                            f"{current} доступен только шаг {current + 1} или возврат "
+                            f"к предыдущим (1–{current - 1})."
+                        ),
+                        "code": "step_skip_forbidden",
+                    },
+                )
+            # Явный переход: следующий шаг (target == current + 1) или возврат назад.
+            task.add_user_message(content)
+            if target < current:
+                rollback_backup = (list(task.task_step_results), task.task_result)
+                task.task_step_results = task.task_step_results[: target - 1]
+                task.task_result = None
+            run_index = target - 1
+            messages = _step_executor_messages(
+                description,
+                task.task_plan or "",
+                task.task_steps,
+                task.task_step_results,
+                run_index,
+                profile_block,
+                rules_frame,
+                directive=content,
+            )
+        else:
+            index = len(task.task_step_results) - 1
+            task.add_user_message(content)
+            messages = _step_revise_messages(
+                description,
+                task.task_plan or "",
+                task.task_steps,
+                task.task_step_results,
+                index,
+                content,
+                profile_block,
+                rules_frame,
+            )
 
     gen_settings = task.settings
     runner = StreamedCompletion(client=request.app.state.http_client)
@@ -469,21 +656,74 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
 
         yield _sse({"type": "session", "id": task_id})
         try:
+            if action == "run_all":
+                # Весь план пошагово: по одному запросу исполнителя на шаг,
+                # без пауз; после каждого — stage=step_review, в конце review.
+                total = len(task.task_steps)
+                for index in range(total):
+                    step_messages = _step_executor_messages(
+                        description,
+                        task.task_plan or "",
+                        task.task_steps,
+                        task.task_step_results,
+                        index,
+                        profile_block,
+                        rules_frame,
+                    )
+                    yield _sse({"type": "step_run", "index": index, "total": total})
+                    async for event in task.stream_completion(
+                        runner, spec, gen_settings, messages=step_messages,
+                        prompt_kind="run_all",
+                    ):
+                        if event.get("type") == "done":
+                            task.task_step_results.append(event.get("content") or "")
+                            task.task_stage = "step_review"
+                            for frame in drain_request_logs():
+                                yield frame
+                        yield _sse(event)
+                    _collect_prompt_logs(registry, task, "Задача", task.title or "")
+                    # Без пользовательских маркеров: шаги как самостоятельные
+                    # ответы ассистента — персистим одиночное сообщение.
+                    registry.remember_assistant(task)
+                    registry.persist_task_state(task)
+                    registry.persist_new_requests(task)
+                    for frame in drain_request_logs():
+                        yield frame
+                    yield _sse(_stage_event(task))
+                task.task_result = _combine_step_result(
+                    task.task_steps, task.task_step_results
+                )
+                task.task_stage = "review"
+                registry.persist_task_state(task)
+                yield _sse(_stage_event(task))
+                return
+
             async for event in task.stream_completion(
                 runner, spec, gen_settings, messages=messages, prompt_kind=action
             ):
                 if event.get("type") == "done":
                     text = event.get("content") or ""
                     if action in ("describe", "revise"):
-                        task.task_stage = "plan_review"
-                        task.task_plan = text
-                    elif action == "run_all":
-                        task.task_stage = "review"
-                        task.task_result = text
-                    else:  # start_steps / confirm_step / revise_step
-                        if action == "revise_step":
+                        if action == "revise" and rework_index is not None:
+                            # Точечная доработка шага на валидации: результат
+                            # заменяется на месте, итог пересобирается.
+                            task.task_step_results[rework_index] = text
+                            task.task_result = _combine_step_result(
+                                task.task_steps, task.task_step_results
+                            )
+                            task.task_stage = "review"
+                        else:
+                            task.task_stage = "plan_review"
+                            task.task_plan = text
+                            # Шаги разбираем сразу — доступны для правок и рельсы.
+                            task.task_steps = _parse_steps(text)
+                            task.task_step_results = []
+                    else:  # start_steps / confirm_step / revise_step / edit_step
+                        if action == "revise_step" and run_index is None:
+                            # Доработка текущего шага — результат заменяется.
                             task.task_step_results[-1] = text
                         else:
+                            # Выполнение/возврат/следующий шаг — результат добавляется.
                             task.task_step_results.append(text)
                         task.task_stage = "step_review"
                     for frame in drain_request_logs():
@@ -498,10 +738,15 @@ async def advance_task(task_id: str, body: TaskAdvanceRequest, request: Request)
             yield _sse(_stage_event(task))
         except ProviderError as exc:
             task.rollback_user_message()
+            if rollback_backup is not None:
+                # Сбой перезапуска правленого шага — возвращаем откаченный прогресс.
+                task.task_step_results, task.task_result = rollback_backup
             registry.persist_new_requests(task)
             yield _sse(_provider_error_event(exc, task))
         except Exception as exc:  # noqa: BLE001 - отдаём ошибку клиенту событием
             task.rollback_user_message()
+            if rollback_backup is not None:
+                task.task_step_results, task.task_result = rollback_backup
             registry.persist_new_requests(task)
             yield _sse({"type": "error", "error": str(exc)})
         finally:

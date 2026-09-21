@@ -53,6 +53,7 @@ class TaskAdvanceRequest(BaseModel):
 
     action: str
     content: Optional[str] = None
+    index: Optional[int] = None
     model: Optional[str] = None
     settings: Optional[dict[str, Any]] = None
 
