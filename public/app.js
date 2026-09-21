@@ -62,7 +62,8 @@ const viewTabTasks = document.getElementById('view-tab-tasks');
 const tasksView = document.getElementById('tasks-view');
 const tasksTabList = document.getElementById('tasks-tab-list');
 const tasksAdd = document.getElementById('tasks-add');
-const taskMessages = document.getElementById('task-messages');
+const taskMessagesArea = document.getElementById('task-messages-area');
+const taskRail = document.getElementById('task-rail');
 const taskActions = document.getElementById('task-actions');
 const factsPanel = document.getElementById('facts-panel');
 const factsList = document.getElementById('facts-list');
@@ -1832,7 +1833,7 @@ function makeTaskMessagesEl() {
   const el = document.createElement('div');
   el.className = 'chat__messages';
   el.hidden = true;
-  taskMessages.appendChild(el);
+  taskMessagesArea.appendChild(el);
   return el;
 }
 
@@ -1902,7 +1903,188 @@ function renderTasksView() {
   for (const t of tasks) {
     if (t.messagesEl) t.messagesEl.hidden = t !== task;
   }
+  renderTaskRail(task);
   renderTaskActions(task);
+}
+
+// ── Рельса этапов/шагов задачи (вертикальная визуализация слева) ───────────
+function renderTaskRail(task) {
+  if (!taskRail) return;
+  taskRail.innerHTML = '';
+  if (!task) {
+    taskRail.hidden = true;
+    return;
+  }
+  taskRail.hidden = false;
+
+  const stage = task.stage;
+  const steps = task.steps || [];
+  const results = task.step_results || [];
+  const busy = Boolean(task.busy);
+  const planning =
+    stage === 'input' || stage === 'plan_review' || stage === 'mode_select';
+  const inReview = stage === 'review';
+  const isDone = stage === 'done';
+  const canEdit = !busy && stage !== 'input' && stage !== 'done' && steps.length > 0;
+
+  // Номер выполняемого сейчас шага (спиннер) и шага на подтверждении.
+  let runningIndex = -1;
+  if (busy && steps.length) {
+    runningIndex =
+      task.busyAction === 'revise_step'
+        ? Math.max(0, results.length - 1)
+        : results.length;
+  }
+  // Шаг «на подтверждении» подсвечиваем только вне стрима: во время
+  // выполнения подтверждённые шаги сразу помечаются выполненными.
+  const activeIndex =
+    !busy && stage === 'step_review' && results.length ? results.length - 1 : -1;
+  // Сколько шагов показывать выполненными.
+  const doneCount = inReview || isDone
+    ? steps.length
+    : activeIndex >= 0
+      ? activeIndex
+      : results.length;
+
+  const planningRunning =
+    busy && (task.busyAction === 'describe' || task.busyAction === 'revise');
+  taskRail.appendChild(
+    railNode('Планирование', 0, {
+      state: planningRunning ? 'running' : planning ? 'active' : 'done'
+    })
+  );
+
+  if (steps.length) {
+    steps.forEach((text, index) => {
+      let state = 'pending';
+      if (index === runningIndex) state = 'running';
+      else if (index === activeIndex) state = 'active';
+      else if (index < doneCount) state = 'done';
+      const node = railNode(text, index + 1, { step: true, state });
+      node.title = text;
+      if (canEdit) {
+        node.classList.add('tasks__node--clickable');
+        node.setAttribute('role', 'button');
+        node.tabIndex = 0;
+        node.addEventListener('click', () => beginStepEdit(task, index));
+        node.addEventListener('keydown', (event) => {
+          // Только клавиши на самом узле (не из textarea редактора).
+          if (event.target !== node) return;
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            beginStepEdit(task, index);
+          }
+        });
+      }
+      taskRail.appendChild(node);
+    });
+  } else if (!planning) {
+    // Режим «всё сразу» (run_all): шагов нет — один узел выполнения.
+    taskRail.appendChild(
+      railNode('Выполнение', 0, {
+        state: busy ? 'running' : inReview || isDone ? 'done' : 'pending'
+      })
+    );
+  }
+
+  taskRail.appendChild(
+    railNode('Валидация', 0, {
+      state: inReview ? 'active' : isDone ? 'done' : 'pending'
+    })
+  );
+}
+
+function railNode(label, number, opts) {
+  // Обычный div (а не button): внутри узла-шага может открываться редактор
+  // с собственными кнопками — вложенные button в button невалидны и ломают
+  // обработку кликов.
+  const node = document.createElement('div');
+  node.className = 'tasks__node';
+  if (opts.step) node.classList.add('tasks__node-step');
+  if (opts.state === 'done') node.classList.add('tasks__node--done');
+  if (opts.state === 'active' || opts.state === 'running') {
+    node.classList.add('tasks__node--active');
+  }
+  if (opts.state === 'pending') node.classList.add('tasks__node--pending');
+
+  const marker = document.createElement('span');
+  marker.className = 'tasks__node-marker';
+  if (opts.state === 'running') {
+    const spinner = document.createElement('span');
+    spinner.className = 'tasks__node-spinner';
+    marker.appendChild(spinner);
+  } else if (opts.state === 'done') {
+    marker.textContent = '✓';
+  } else if (number > 0) {
+    marker.textContent = String(number);
+  }
+
+  const text = document.createElement('span');
+  text.className = 'tasks__node-label';
+  if (opts.step && number > 0) {
+    const num = document.createElement('span');
+    num.className = 'tasks__node-num';
+    num.textContent = `Шаг ${number}: `;
+    text.appendChild(num);
+  }
+  text.appendChild(document.createTextNode(label));
+  node.append(marker, text);
+  return node;
+}
+
+function beginStepEdit(task, index) {
+  if (!taskRail || !task || task.busy) return;
+  const nodes = taskRail.querySelectorAll('.tasks__node-step');
+  const node = nodes[index];
+  if (!node) return;
+  // Защита от повторного входа (клик по узлу всплывает из редактора).
+  if (node.querySelector('.tasks__node-edit')) return;
+  const original = task.steps[index] || '';
+
+  node.innerHTML = '';
+  const editor = document.createElement('div');
+  editor.className = 'tasks__node-edit';
+  // Клики внутри редактора не всплывают к обработчику узла.
+  editor.addEventListener('click', (event) => event.stopPropagation());
+  editor.addEventListener('keydown', (event) => event.stopPropagation());
+  const input = document.createElement('textarea');
+  input.className = 'tasks__node-edit-input';
+  input.value = original;
+  const actions = document.createElement('div');
+  actions.className = 'tasks__node-edit-actions';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'tasks__node-edit-btn tasks__node-edit-btn--save';
+  save.textContent = 'Сохранить';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'tasks__node-edit-btn';
+  cancel.textContent = 'Отмена';
+  const commit = () => {
+    const value = input.value.trim();
+    const norm = (s) => s.replace(/\s+/g, ' ').trim();
+    // Правка одних пробелов смысл не меняет — ничего не перезапускаем.
+    if (!value || norm(value) === norm(original)) {
+      renderTaskRail(task);
+      return;
+    }
+    editStepTask(task, index, value);
+  };
+  save.addEventListener('click', commit);
+  cancel.addEventListener('click', () => renderTaskRail(task));
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      commit();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      renderTaskRail(task);
+    }
+  });
+  actions.append(save, cancel);
+  editor.append(input, actions);
+  node.appendChild(editor);
+  input.focus();
 }
 
 function taskButton(text, cls, onClick) {
@@ -1959,29 +2141,14 @@ function renderTaskActions(task) {
   hint.textContent = taskStageHint(task);
   taskActions.appendChild(hint);
 
-  const toggleFeedback = () => {
-    const row = taskActions.querySelector('.tasks__feedback');
-    if (row) {
-      row.hidden = !row.hidden;
-      const area = row.querySelector('.tasks__input');
-      if (!row.hidden && area) area.focus();
-    }
-  };
-  const feedback = (placeholder, action = 'revise') =>
-    taskFeedbackRow(
-      task,
-      placeholder,
-      'Отправить замечания',
-      (text) => advanceTask(task, action, text),
-      true
+  // Поле замечаний показывается постоянно (без кнопки-переключателя).
+  const remark = (placeholder, action) =>
+    taskFeedbackRow(task, placeholder, 'Отправить', (text) =>
+      advanceTask(task, action, text)
     );
 
   if (task.stage === 'input') {
-    taskActions.appendChild(
-      taskFeedbackRow(task, 'Опишите задачу...', 'Отправить', (text) =>
-        advanceTask(task, 'describe', text)
-      )
-    );
+    taskActions.appendChild(remark('Опишите задачу...', 'describe'));
   } else if (task.stage === 'done') {
     const done = document.createElement('div');
     done.className = 'tasks__done';
@@ -1994,43 +2161,42 @@ function renderTaskActions(task) {
     copy.addEventListener('click', () => copyToClipboard(task.result || ''));
     done.append(label, copy);
     taskActions.appendChild(done);
+  } else if (task.stage === 'mode_select') {
+    const row = document.createElement('div');
+    row.className = 'tasks__row';
+    row.append(
+      taskButton('Выполнить по шагам', 'tasks__btn--primary', () =>
+        advanceTask(task, 'start_steps')
+      ),
+      taskButton('Выполнить всё сразу', 'tasks__btn--ghost', () =>
+        runAllTask(task)
+      )
+    );
+    taskActions.appendChild(row);
   } else {
     const row = document.createElement('div');
     row.className = 'tasks__row';
     if (task.stage === 'plan_review') {
-      row.append(
+      row.appendChild(
         taskButton('Подтвердить план', 'tasks__btn--primary', () =>
           taskActionJson(task, 'confirm')
-        ),
-        taskButton('Доработать', 'tasks__btn--ghost', toggleFeedback)
-      );
-      taskActions.append(row, feedback('Что изменить в плане...'));
-    } else if (task.stage === 'mode_select') {
-      row.append(
-        taskButton('Выполнить по шагам', 'tasks__btn--primary', () =>
-          advanceTask(task, 'start_steps')
-        ),
-        taskButton('Выполнить всё сразу', 'tasks__btn--ghost', () =>
-          advanceTask(task, 'run_all')
         )
       );
-      taskActions.appendChild(row);
+      taskActions.append(row, remark('Замечания к плану...', 'revise'));
     } else if (task.stage === 'step_review') {
-      row.append(
+      row.appendChild(
         taskButton('Принять шаг', 'tasks__btn--primary', () =>
           confirmStepTask(task)
-        ),
-        taskButton('Доработать шаг', 'tasks__btn--ghost', toggleFeedback)
+        )
       );
-      taskActions.append(row, feedback('Что исправить в шаге...', 'revise_step'));
+      taskActions.append(row, remark('Что исправить в шаге или куда перейти (например: вернись к шагу 2)...', 'revise_step'));
     } else if (task.stage === 'review') {
-      row.append(
+      row.appendChild(
         taskButton('Одобрить', 'tasks__btn--primary', () =>
           taskActionJson(task, 'approve')
-        ),
-        taskButton('Доработать', 'tasks__btn--ghost', toggleFeedback)
+        )
       );
-      taskActions.append(row, feedback('Что доработать в результате...'));
+      taskActions.append(row, remark('Что доработать в результате или какой шаг поправить (например: доработай шаг 2)...', 'revise'));
     }
   }
 
@@ -2139,8 +2305,6 @@ async function advanceTask(task, action, content) {
   if (action === 'describe' || action === 'revise' || action === 'revise_step') {
     if (!content) return;
     marker = content;
-  } else if (action === 'run_all') {
-    marker = 'Выполни весь план.';
   } else if (action === 'start_steps') {
     marker = 'Выполни шаг 1.';
   }
@@ -2155,21 +2319,127 @@ async function advanceTask(task, action, content) {
   }
 
   task.busy = true;
+  task.busyAction = action;
   renderTaskActions(task);
+  renderTaskRail(task);
   await streamTaskAdvance(task, action, content, qaEl);
   task.busy = false;
+  task.busyAction = null;
   renderTasksView();
 }
 
-// Действия протокола без обращения к LLM (JSON-ответ с прогрессом).
-async function taskActionJson(task, action) {
+// «Выполнить всё сразу»: сервер последовательно выполняет каждый шаг плана
+// (по одному запросу к LLM на шаг), клиент рисует каждый шаг по мере прихода
+// событий step_run/reasoning/done и обновляет рельсу.
+async function runAllTask(task) {
   if (!task || task.busy || !task.sid) return;
+  if (!activeProfile()) {
+    addTaskNotice(task, 'Необходимо создать и установить профиль.');
+    return;
+  }
+
+  task.busy = true;
+  task.busyAction = 'run_all';
+  renderTaskActions(task);
+  renderTaskRail(task);
+
+  let current = null; // текущий шаг: {qaEl, el, content}
+  const closeCurrentError = (message) => {
+    if (!current) return;
+    removeWaiter(current.content);
+    setBubbleText(task, current.el, `Ошибка: ${message}`);
+    current.el.classList.add('message--error');
+    const last = task.history[task.history.length - 1];
+    if (last && last.role === 'user') task.history.pop();
+    renderQaStats(current.wrap, formatMetaLine(null));
+    current = null;
+  };
+
   try {
-    logClient('send', `POST /api/tasks/${task.sid}/advance`, { action });
+    logClient('send', `POST /api/tasks/${task.sid}/advance`, { action: 'run_all' });
     const res = await fetch(`/api/tasks/${task.sid}/advance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action })
+      body: JSON.stringify({ action: 'run_all' })
+    });
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      const error = new Error(data.error || `Ошибка ${res.status}`);
+      error.code = data.code || null;
+      throw error;
+    }
+
+    for await (const chunk of parseSSE(res)) {
+      logClient('receive', `POST /api/tasks/${task.sid}/advance — событие`, chunk);
+      if (chunk.type === 'step_run') {
+        // Без пользовательских маркеров: шаг выглядит как самостоятельный
+        // ответ ассистента с подписью «Шаг N».
+        const wrap = document.createElement('div');
+        wrap.className = 'tasks__step';
+        const label = document.createElement('div');
+        label.className = 'tasks__step-label';
+        label.textContent = `Шаг ${chunk.index + 1}`;
+        const assistantEl = createMessageEl('assistant', '');
+        wrap.append(label, assistantEl);
+        task.messagesEl.appendChild(wrap);
+        const content = assistantEl.querySelector('.message__content');
+        showWaiter(content);
+        scrollChatToBottom(task);
+        current = { wrap, el: assistantEl, content };
+        renderTaskRail(task);
+      } else if (chunk.type === 'reasoning_start' && current) {
+        createReasoning(current.el);
+        showWaiter(current.content);
+        scrollChatToBottom(task);
+      } else if (chunk.type === 'reasoning_end' && current) {
+        const thinking = chunk.content || '';
+        if (thinking) setReasoningText(current.el, thinking);
+        finishReasoning(current.el);
+        showWaiter(current.content);
+        scrollChatToBottom(task);
+      } else if (chunk.type === 'done' && current) {
+        const fullText = chunk.content || '';
+        const meta = chunk.meta || null;
+        removeWaiter(current.content);
+        setBubbleText(task, current.el, fullText || emptyResponseText(meta, null));
+        task.history.push({ role: 'assistant', content: fullText, meta });
+        renderQaStats(current.wrap, formatMetaLine(meta));
+        current = null;
+      } else if (chunk.type === 'request_log') {
+        handleTaskRequestLog(task, chunk.record);
+      } else if (chunk.type === 'stage') {
+        applyTaskProgress(task, chunk);
+        renderTaskRail(task);
+      } else if (chunk.type === 'error') {
+        const error = new Error(chunk.error || 'Неизвестная ошибка сервера');
+        error.code = chunk.code || null;
+        throw error;
+      }
+    }
+  } catch (err) {
+    if (current) {
+      closeCurrentError(err.message);
+    } else {
+      addTaskNotice(task, `Ошибка: ${err.message}`);
+    }
+  } finally {
+    task.busy = false;
+    task.busyAction = null;
+    renderTasksView();
+  }
+}
+
+// Действия протокола без обращения к LLM (JSON-ответ с прогрессом).
+async function taskActionJson(task, action, extra) {
+  if (!task || task.busy || !task.sid) return;
+  const payload = { action };
+  if (extra) Object.assign(payload, extra);
+  try {
+    logClient('send', `POST /api/tasks/${task.sid}/advance`, payload);
+    const res = await fetch(`/api/tasks/${task.sid}/advance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -2202,9 +2472,51 @@ async function confirmStepTask(task) {
   task.history.push({ role: 'user', content: marker });
   const qaEl = addTaskQa(task, marker);
   task.busy = true;
+  task.busyAction = 'confirm_step';
   renderTaskActions(task);
+  renderTaskRail(task);
   await streamTaskAdvance(task, 'confirm_step', null, qaEl);
   task.busy = false;
+  task.busyAction = null;
+  renderTasksView();
+}
+
+// Правка шага плана: если шаг уже выполнен — откат и его повторный запуск (SSE),
+// иначе шаг просто обновляется (JSON; стадия и прогресс не меняются).
+async function editStepTask(task, index, content) {
+  if (!task || task.busy || !task.sid) return;
+  const rollback = index < (task.step_results || []).length;
+  if (!rollback) {
+    await taskActionJson(task, 'edit_step', { index, content });
+    return;
+  }
+  if (!activeProfile()) {
+    addTaskNotice(task, 'Необходимо создать и установить профиль.');
+    return;
+  }
+  const marker = `Выполни шаг ${index + 1}.`;
+  task.history.push({ role: 'user', content: marker });
+  const qaEl = addTaskQa(task, marker);
+  // Оптимистичный откат: последующие шаги сразу помечаются «не выполнено»,
+  // правленый шаг получает спиннер (вейтер).
+  const backup = {
+    results: [...(task.step_results || [])],
+    result: task.result
+  };
+  task.step_results = (task.step_results || []).slice(0, index);
+  task.result = null;
+  task.busy = true;
+  task.busyAction = 'edit_step';
+  renderTaskActions(task);
+  renderTaskRail(task);
+  const ok = await streamTaskAdvance(task, 'edit_step', null, qaEl, { index, content });
+  if (!ok) {
+    // Сбой перезапуска — возвращаем прежний прогресс.
+    task.step_results = backup.results;
+    task.result = backup.result;
+  }
+  task.busy = false;
+  task.busyAction = null;
   renderTasksView();
 }
 
@@ -2217,7 +2529,7 @@ function applyTaskProgress(task, data) {
   if (data.result !== undefined) task.result = data.result;
 }
 
-async function streamTaskAdvance(task, action, content, qaEl) {
+async function streamTaskAdvance(task, action, content, qaEl, extra) {
   const assistantEl = createMessageEl('assistant', '');
   qaEl.appendChild(assistantEl);
   const assistantContent = assistantEl.querySelector('.message__content');
@@ -2229,6 +2541,7 @@ async function streamTaskAdvance(task, action, content, qaEl) {
 
   const payload = { action };
   if (content != null) payload.content = content;
+  if (extra) Object.assign(payload, extra);
   if (action === 'describe') {
     payload.model = currentModel();
     payload.settings = collectSettings();
@@ -2280,6 +2593,7 @@ async function streamTaskAdvance(task, action, content, qaEl) {
     if (action === 'describe' || action === 'revise') task.plan = full;
     else if (action === 'run_all') task.result = full;
     renderQaStats(qaEl, formatMetaLine(finalMeta));
+    return true;
   } catch (err) {
     removeWaiter(assistantContent);
     setBubbleText(task, assistantEl, `Ошибка: ${err.message}`);
@@ -2287,6 +2601,7 @@ async function streamTaskAdvance(task, action, content, qaEl) {
     const last = task.history[task.history.length - 1];
     if (last && last.role === 'user') task.history.pop();
     renderQaStats(qaEl, formatMetaLine(null));
+    return false;
   }
 }
 

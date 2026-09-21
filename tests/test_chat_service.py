@@ -731,3 +731,20 @@ def test_memory_frame_absent_for_non_chat():
     svc = ChatService("c1", kind=SessionKind.SUMMARY, model="m")
     svc.memory_stores = [MemoryStore("m1", "Профиль", True, [["Имя", "Иван"]])]
     assert svc.memory_frame() is None
+
+
+def test_task_step_prompts_forbid_skipping():
+    """Промпты исполнителя/переделки шага запрещают пропуск шагов вперёд."""
+    from server.services.chat_service import (
+        TASK_STEP_EXECUTOR_SYSTEM_PROMPT,
+        TASK_STEP_REVISE_SYSTEM_PROMPT,
+    )
+
+    for prompt in (TASK_STEP_EXECUTOR_SYSTEM_PROMPT, TASK_STEP_REVISE_SYSTEM_PROMPT):
+        text = prompt.lower()
+        assert "перепрыг" in text  # пропуск нескольких шагов вперёд
+        assert "откажи" in text
+    # возврат назад и переход к следующему шагу — легитимны (не запрещены)
+    revise = TASK_STEP_REVISE_SYSTEM_PROMPT.lower()
+    assert "вернуться" in revise
+    assert "следующему" in revise

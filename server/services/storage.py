@@ -240,6 +240,31 @@ class SessionStore:
                 (max(user_record.created_at, assistant_record.created_at), session_id),
             )
 
+    def append_message(self, session_id: str, record: MessageRecord) -> None:
+        """Дописывает одиночное сообщение (например, шаг задачи без реплики).
+
+        Args:
+            session_id: идентификатор сессии.
+            record: сообщение (обычно ответ ассистента).
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO messages (session_id, role, content, meta, created_at) VALUES (?,?,?,?,?)",
+                (
+                    session_id,
+                    record.role,
+                    record.content,
+                    json.dumps(record.meta.to_dict(), ensure_ascii=False)
+                    if record.meta is not None
+                    else None,
+                    record.created_at,
+                ),
+            )
+            self._conn.execute(
+                "UPDATE sessions SET last_active = ? WHERE id = ?",
+                (record.created_at, session_id),
+            )
+
     def append_request(self, session_id: str, record: RequestRecord) -> None:
         """Дописывает запись о запросе к LLM (для графика/счётчика).
 
