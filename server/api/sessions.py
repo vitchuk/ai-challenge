@@ -421,6 +421,16 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
 
     runner = StreamedCompletion(client=request.app.state.http_client)
 
+    # Инструменты MCP — только для обычных чатов (не для задач/итогов/
+    # оптимизации промпта) и только при наличии подключённых серверов.
+    mcp = getattr(request.app.state, "mcp", None)
+    tool_defs = None
+    tool_executor = None
+    if session.kind == SessionKind.CHAT and mcp is not None:
+        tool_defs = mcp.tool_definitions() or None
+        if tool_defs:
+            tool_executor = mcp.call_tool
+
     async def event_stream():
         # Помечаем чат занятым до первого await: саммаризация (если включена)
         # идёт до основного стрима, и параллельный запрос должен получить 409.
@@ -454,6 +464,8 @@ async def send_message(session_id: str, body: MessageCreateRequest, request: Req
                 gen_settings,
                 extra_system=extra_system,
                 summary_items=summary_items,
+                tools=tool_defs,
+                tool_executor=tool_executor,
             ):
                 if event.get("type") == "done":
                     for frame in drain_request_logs():

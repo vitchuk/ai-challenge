@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Помогатор2К</title>
-  <link rel="stylesheet" href="style.css?v=31" />
+  <link rel="stylesheet" href="style.css?v=32" />
 </head>
 <body>
   <div class="app">
@@ -41,6 +41,16 @@
         >
           <span id="view-tab-profile-icon" class="chat__view-icon"></span>
           Профиль
+        </button>
+        <button
+          id="view-tab-mcp"
+          class="chat__view-tab chat__view-tab--mcp"
+          type="button"
+          title="MCP-серверы"
+          aria-label="MCP-серверы"
+        >
+          <span id="view-tab-mcp-icon" class="chat__view-icon"></span>
+          MCP
         </button>
         <button
           id="view-tab-logs"
@@ -192,6 +202,39 @@
           </span>
         </div>
         <div id="logs-list" class="logs__list"></div>
+      </section>
+
+      <section id="mcp-view" class="chat__mcp" hidden>
+        <div class="mcp__head">
+          <span class="mcp__title">MCP-серверы</span>
+          <span id="mcp-count" class="mcp__count"></span>
+          <span class="mcp__head-actions">
+            <button id="mcp-refresh" class="tasks__btn tasks__btn--ghost" type="button">
+              Обновить
+            </button>
+          </span>
+        </div>
+        <div id="mcp-list" class="mcp__list"></div>
+        <div class="mcp__create">
+          <input
+            id="mcp-new-name"
+            class="memory__name"
+            type="text"
+            placeholder="Название сервера"
+          />
+          <select id="mcp-new-type" class="mcp__select" title="Тип транспорта">
+            <option value="local">local (stdio)</option>
+            <option value="remote">remote (http)</option>
+          </select>
+          <button
+            id="mcp-add"
+            class="memory__add"
+            type="button"
+            title="Добавить MCP-сервер"
+          >
+            +
+          </button>
+        </div>
       </section>
 
       <div id="facts-splitter" class="chat__splitter" hidden></div>
@@ -409,6 +452,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=31"></script>
+  <script src="app.js?v=32"></script>
 </body>
 </html>

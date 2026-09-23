@@ -1821,6 +1821,10 @@ body {
   color: #7fd0a0;
 }
 
+.logs__msg-role--tool {
+  color: #6fa8ff;
+}
+
 .logs__msg-text {
   flex: 1;
   min-width: 0;
@@ -2542,6 +2546,356 @@ body {
 .settings::-webkit-scrollbar-thumb:hover,
 .chat__facts::-webkit-scrollbar-thumb:hover {
   background: rgba(79, 140, 255, 0.7);
+}
+
+/* ── Вид «MCP-серверы» ───────────────────────────────────────────────────── */
+.chat__view-tab--mcp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat__mcp {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 16px;
+}
+
+.mcp__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mcp__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.mcp__count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mcp__head-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+}
+
+/* Тонкий скроллбар списка серверов (правило проекта). */
+.mcp__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.mcp__list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.mcp__list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mcp__list::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 4px;
+}
+
+.mcp__list::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 140, 255, 0.7);
+}
+
+.mcp__empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.mcp__create {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mcp__select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.mcp-server {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(26, 29, 36, 0.6);
+  padding: 12px;
+}
+
+.mcp-server__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mcp-server__dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.mcp-server__dot--connected {
+  background: #46c06f;
+  box-shadow: 0 0 8px rgba(70, 192, 111, 0.6);
+}
+
+.mcp-server__dot--connecting {
+  background: #e0b64a;
+}
+
+.mcp-server__dot--error {
+  background: #e05a5a;
+}
+
+.mcp-server__name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.mcp-server__type {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.mcp-server__status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mcp-server__status--connected {
+  color: #6fd08c;
+}
+
+.mcp-server__status--error {
+  color: #e07a7a;
+}
+
+.mcp-server__actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mcp-server__enabled-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mcp-server__btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.mcp-server__btn:hover {
+  border-color: var(--accent);
+}
+
+.mcp-server__btn--primary {
+  border-color: rgba(79, 140, 255, 0.6);
+  color: var(--accent);
+}
+
+.mcp-server__btn--danger {
+  color: #e07a7a;
+  border-color: rgba(224, 122, 122, 0.4);
+}
+
+.mcp-server__error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #e07a7a;
+  word-break: break-word;
+}
+
+.mcp-server__tools {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mcp-server__tools summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.mcp-server__tool-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.mcp-server__tool-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.mcp-server__tool-list::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 3px;
+}
+
+.mcp-server__tool-name {
+  color: var(--text);
+  font-family: monospace;
+  margin-right: 6px;
+}
+
+.mcp-server__tool-desc {
+  color: var(--muted);
+}
+
+.mcp-server__config {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mcp-server__field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mcp-server__field-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mcp-server__input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 7px 9px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.mcp-server__input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.mcp-server__hint {
+  font-size: 12px;
+  color: #e07a7a;
+}
+
+/* ── Блоки вызовов MCP-инструментов в сообщении ──────────────────────────── */
+.message__tool {
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.message__tool summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  color: var(--accent);
+}
+
+.message__tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.message__tool--done summary {
+  color: var(--muted);
+}
+
+.message__tool-body {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.message__tool-args,
+.message__tool-result {
+  margin: 0;
+  padding: 6px 8px;
+  background: rgba(15, 17, 21, 0.6);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(79, 140, 255, 0.45) transparent;
+}
+
+.message__tool-args::-webkit-scrollbar,
+.message__tool-result::-webkit-scrollbar {
+  width: 6px;
+}
+
+.message__tool-args::-webkit-scrollbar-thumb,
+.message__tool-result::-webkit-scrollbar-thumb {
+  background: rgba(79, 140, 255, 0.45);
+  border-radius: 3px;
+}
+
+.message__tool-result {
+  color: var(--text);
+}
+
+.message__tool-result--error {
+  color: #e07a7a;
 }
 
 @media (max-width: 700px) {

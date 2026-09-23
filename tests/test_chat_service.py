@@ -24,7 +24,8 @@ class FakeRunner:
     def __init__(self, events):
         self.events = events
 
-    async def run(self, spec, messages, settings):
+    async def run(self, spec, messages, settings, tools=None):
+        self.tools = tools
         for e in self.events:
             yield e
         self.seen_messages = messages
@@ -231,8 +232,8 @@ class ScriptedRunner:
         self.scripts = list(scripts)
         self.calls = []
 
-    async def run(self, spec, messages, settings):
-        self.calls.append({"messages": messages, "settings": settings})
+    async def run(self, spec, messages, settings, tools=None):
+        self.calls.append({"messages": messages, "settings": settings, "tools": tools})
         script = self.scripts.pop(0) if self.scripts else []
         if isinstance(script, Exception):
             raise script
@@ -748,3 +749,159 @@ def test_task_step_prompts_forbid_skipping():
     revise = TASK_STEP_REVISE_SYSTEM_PROMPT.lower()
     assert "вернуться" in revise
     assert "следующему" in revise
+
+
+# --- tool calling (MCP) ---------------------------------------------------
+
+
+def tool_call_events(
+    name="mcp_demo_get_item",
+    arguments='{"id": 1}',
+    call_id="call_1",
+    prompt=100,
+    completion=10,
+):
+    """События раунда: модель запросила вызов инструмента."""
+    from server.providers.base import ChatEvent, Usage
+
+    return [
+        ChatEvent(
+            kind="done",
+            finish_reason="tool_calls",
+            tool_calls=[{"id": call_id, "name": name, "arguments": arguments}],
+            usage=Usage(prompt_tokens=prompt, completion_tokens=completion),
+        ),
+    ]
+
+
+def tool_spec():
+    return [
+        {
+            "type": "function",
+            "function": {"name": "mcp_demo_get_item", "parameters": {}},
+        }
+    ]
+
+
+async def collect_events(svc, runner, *, tools=None, executor=None, settings=None):
+    events = []
+    async for event in svc.stream_completion(
+        runner,
+        spec_obj(),
+        settings or svc.settings,
+        tools=tools,
+        tool_executor=executor,
+    ):
+        events.append(event)
+    return events
+
+
+def test_tool_loop_executes_and_continues():
+    svc = ChatService("c1", model="m")
+    svc.add_user_message("покажи пост")
+    calls = []
+
+    async def executor(name, args):
+        calls.append((name, args))
+        return "post-1", False
+
+    runner = ScriptedRunner(
+        [
+            tool_call_events(arguments='{"resource": "posts", "id": 1}'),
+            text_events("Вот пост 1", prompt=200, completion=20),
+        ]
+    )
+    events = run_coro(
+        collect_events(svc, runner, tools=tool_spec(), executor=executor)
+    )
+
+    assert [e["type"] for e in events] == ["tool_call", "tool_result", "done"]
+    assert events[0]["tool"] == "mcp_demo_get_item"
+    assert events[0]["args"] == {"resource": "posts", "id": 1}
+    assert events[1]["content"] == "post-1" and events[1]["is_error"] is False
+    assert events[2]["content"] == "Вот пост 1"
+    # токены обоих раундов суммированы в метаданные ответа
+    assert events[2]["meta"]["prompt_tokens"] == 300
+    assert events[2]["meta"]["completion_tokens"] == 30
+    assert calls == [("mcp_demo_get_item", {"resource": "posts", "id": 1})]
+
+    # во втором раунде модели ушли assistant(tool_calls) и tool-результат
+    assert runner.calls[0]["tools"] == tool_spec()
+    second = runner.calls[1]["messages"]
+    assert second[-2]["role"] == "assistant"
+    assert second[-2]["tool_calls"][0]["function"]["name"] == "mcp_demo_get_item"
+    assert second[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "post-1",
+    }
+    # в историю чата попал только итоговый ответ, без tool-сообщений
+    assert svc.history[-1].content == "Вот пост 1"
+    assert all(r.role in ("user", "assistant", "system") for r in svc.history)
+    assert len(svc.requests) == 2
+
+
+def test_tool_loop_stops_after_max_rounds():
+    from server.services.chat_service import MAX_TOOL_ROUNDS
+
+    svc = ChatService("c1", model="m")
+    svc.add_user_message("x")
+
+    async def executor(name, args):
+        return "ok", False
+
+    runner = ScriptedRunner([tool_call_events() for _ in range(MAX_TOOL_ROUNDS + 1)])
+    run_coro(collect_events(svc, runner, tools=tool_spec(), executor=executor))
+
+    # MAX_TOOL_ROUNDS раундов с инструментами + финальный — без
+    assert len(runner.calls) == MAX_TOOL_ROUNDS + 1
+    assert runner.calls[0]["tools"] == tool_spec()
+    assert runner.calls[MAX_TOOL_ROUNDS]["tools"] is None
+
+
+def test_tool_error_becomes_result():
+    svc = ChatService("c1", model="m")
+    svc.add_user_message("x")
+
+    async def executor(name, args):
+        raise RuntimeError("boom")
+
+    runner = ScriptedRunner([tool_call_events(), text_events("ок")])
+    events = run_coro(
+        collect_events(svc, runner, tools=tool_spec(), executor=executor)
+    )
+    result = [e for e in events if e["type"] == "tool_result"][0]
+    assert result["is_error"] is True
+    assert "boom" in result["content"]
+
+
+def test_tools_skipped_in_json_mode():
+    svc = ChatService("c1", model="m")
+    svc.add_user_message("x")
+    settings = GenerationSettings(response_format={"type": "json_object"})
+
+    async def executor(name, args):
+        return "ok", False
+
+    runner = ScriptedRunner([text_events("{}")])
+    events = run_coro(
+        collect_events(
+            svc,
+            runner,
+            tools=tool_spec(),
+            executor=executor,
+            settings=settings,
+        )
+    )
+    assert runner.calls[0]["tools"] is None
+    assert [e["type"] for e in events] == ["done"]
+
+
+def test_tool_calls_ignored_without_executor():
+    svc = ChatService("c1", model="m")
+    svc.add_user_message("x")
+    runner = ScriptedRunner([tool_call_events()])
+    events = run_coro(collect_events(svc, runner))
+    assert [e["type"] for e in events] == ["done"]
+    assert svc.history[-1].content == ""
+
