@@ -37,13 +37,16 @@ class ChatEvent:
 
     ``kind`` принимает значения: ``"delta"``, ``"reasoning_start"``,
     ``"reasoning_end"``, ``"usage"``, ``"done"``. Событие ``done`` несёт
-    финальный ``finish_reason`` и ``usage``.
+    финальный ``finish_reason`` и ``usage``. Если модель запросила вызов
+    инструментов, ``done`` дополнительно несёт ``tool_calls`` (список
+    ``{"id", "name", "arguments"}``).
     """
 
     kind: str
     content: str = ""
     finish_reason: Optional[str] = None
     usage: Optional[Usage] = None
+    tool_calls: Optional[list[dict]] = None
 
 
 class ProviderError(Exception):
@@ -91,6 +94,7 @@ class LLMProvider(abc.ABC):
         spec: ProviderSpec,
         messages: list[dict],
         settings: GenerationSettings,
+        tools: Optional[list[dict]] = None,
     ) -> AsyncIterator[ChatEvent]:
         """Итерирует по нормализованным событиям ответа модели.
 
@@ -98,6 +102,7 @@ class LLMProvider(abc.ABC):
             spec: описание вызова апстрима (endpoint/ключ/модель/заголовки).
             messages: массив сообщений в формате OpenAI (role + content).
             settings: параметры генерации.
+            tools: OpenAI-описания доступных инструментов (или ``None``).
 
         Yields:
             События :class:`ChatEvent` по мере поступления данных.

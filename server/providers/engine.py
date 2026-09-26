@@ -77,14 +77,84 @@ def _classify_upstream_error(status: int, message: str) -> tuple[Optional[str], 
     return "context_length_exceeded", details
 
 
+def _parse_tool_calls(delta: dict) -> list[dict]:
+    """Извлекает фрагменты ``tool_calls`` из дельты апстрима.
+
+    Провайдеры шлют вызовы инструментов частями: ``id`` и ``name`` приходят
+    целиком, ``arguments`` — фрагментами JSON, которые затем склеиваются.
+    """
+    raw = delta.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    fragments: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        if not isinstance(index, int):
+            index = 0
+        function = item.get("function")
+        function = function if isinstance(function, dict) else {}
+        fragments.append(
+            {
+                "index": index,
+                "id": item.get("id") if isinstance(item.get("id"), str) else None,
+                "name": function.get("name")
+                if isinstance(function.get("name"), str)
+                else None,
+                "arguments": function.get("arguments")
+                if isinstance(function.get("arguments"), str)
+                else None,
+            }
+        )
+    return fragments
+
+
+def _accumulate_tool_calls(acc: dict, fragments: list[dict]) -> None:
+    """Накапливает фрагменты вызовов инструментов по индексу."""
+    for fragment in fragments:
+        slot = acc.setdefault(
+            fragment["index"], {"id": None, "name": None, "arguments": ""}
+        )
+        if fragment["id"]:
+            slot["id"] = fragment["id"]
+        if fragment["name"]:
+            slot["name"] = (slot["name"] or "") + fragment["name"]
+        if fragment["arguments"]:
+            slot["arguments"] += fragment["arguments"]
+
+
+def _build_tool_calls(acc: dict) -> list[dict]:
+    """Собирает завершённые вызовы инструментов из накопленных фрагментов."""
+    calls = []
+    for index in sorted(acc):
+        slot = acc[index]
+        if not slot["name"]:
+            continue
+        calls.append(
+            {
+                "id": slot["id"] or f"call_{index}",
+                "name": slot["name"],
+                "arguments": slot["arguments"] or "{}",
+            }
+        )
+    return calls
+
+
 def _parse_event_data(data_str: str) -> Optional[ChatEvent]:
     """Превращает одну ``data:``-строку апстрима в событие (или ``None``)."""
+    event, _ = _parse_event_data_full(data_str)
+    return event
+
+
+def _parse_event_data_full(data_str: str) -> tuple[Optional[ChatEvent], list[dict]]:
+    """Разбирает ``data:``-строку на событие и фрагменты ``tool_calls``."""
     try:
         data = json.loads(data_str)
     except json.JSONDecodeError:
-        return None
+        return None, []
     if not isinstance(data, dict):
-        return None
+        return None, []
 
     usage = data.get("usage")
     if isinstance(usage, dict):
@@ -94,22 +164,25 @@ def _parse_event_data(data_str: str) -> Optional[ChatEvent]:
             if isinstance(details_raw, dict)
             else None
         )
-        return ChatEvent(
-            kind="usage",
-            usage=Usage(
-                prompt_tokens=usage.get("prompt_tokens"),
-                completion_tokens=usage.get("completion_tokens"),
-                total_tokens=usage.get("total_tokens"),
-                details=details,
+        return (
+            ChatEvent(
+                kind="usage",
+                usage=Usage(
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
+                    total_tokens=usage.get("total_tokens"),
+                    details=details,
+                ),
             ),
+            [],
         )
 
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
-        return None
+        return None, []
     choice = choices[0]
     if not isinstance(choice, dict):
-        return None
+        return None, []
 
     finish_reason = choice.get("finish_reason")
     if finish_reason:
@@ -122,27 +195,33 @@ def _parse_event_data(data_str: str) -> Optional[ChatEvent]:
             if isinstance(details_raw, dict)
             else None
         )
-        return ChatEvent(
-            kind="done",
-            finish_reason=finish_reason,
-            usage=Usage(
-                prompt_tokens=usage.get("prompt_tokens") if usage else None,
-                completion_tokens=usage.get("completion_tokens") if usage else None,
-                total_tokens=usage.get("total_tokens") if usage else None,
-                details=details,
+        delta = choice.get("delta")
+        fragments = _parse_tool_calls(delta) if isinstance(delta, dict) else []
+        return (
+            ChatEvent(
+                kind="done",
+                finish_reason=finish_reason,
+                usage=Usage(
+                    prompt_tokens=usage.get("prompt_tokens") if usage else None,
+                    completion_tokens=usage.get("completion_tokens") if usage else None,
+                    total_tokens=usage.get("total_tokens") if usage else None,
+                    details=details,
+                ),
             ),
+            fragments,
         )
 
     delta = choice.get("delta")
     if not isinstance(delta, dict):
-        return None
+        return None, []
+    fragments = _parse_tool_calls(delta)
     reasoning = delta.get("reasoning_content")
     content = delta.get("content")
     if isinstance(reasoning, str) and reasoning:
-        return ChatEvent(kind="reasoning", content=reasoning)
+        return ChatEvent(kind="reasoning", content=reasoning), fragments
     if isinstance(content, str) and content:
-        return ChatEvent(kind="delta", content=content)
-    return None
+        return ChatEvent(kind="delta", content=content), fragments
+    return None, fragments
 
 
 async def stream_completion(
@@ -150,6 +229,7 @@ async def stream_completion(
     spec: ProviderSpec,
     messages: list[dict],
     settings: GenerationSettings,
+    tools: Optional[list[dict]] = None,
 ) -> AsyncIterator[ChatEvent]:
     """Выполняет стриминговый запрос к апстриму и нормализует ответ.
 
@@ -158,6 +238,7 @@ async def stream_completion(
         spec: описание вызова апстрима.
         messages: массив сообщений OpenAI (role + content).
         settings: параметры генерации.
+        tools: OpenAI-описания доступных инструментов (или ``None``).
 
     Yields:
         Нормализованные события :class:`ChatEvent`.
@@ -181,6 +262,8 @@ async def stream_completion(
         "stream_options": {"include_usage": True},
         **settings.to_upstream(),
     }
+    if tools:
+        payload["tools"] = tools
 
     try:
         async with client.stream(
@@ -200,6 +283,8 @@ async def stream_completion(
             buffer = ""
             reasoning_buf: list[str] = []
             reasoning_open = False
+            tool_acc: dict = {}
+            done_seen = False
 
             def take_reasoning() -> str:
                 """Забирает и сбрасывает накопленное рассуждение.
@@ -227,8 +312,18 @@ async def stream_completion(
                         text = take_reasoning()
                         if text:
                             yield ChatEvent(kind="reasoning_end", content=text)
+                        if not done_seen and tool_acc:
+                            calls = _build_tool_calls(tool_acc)
+                            if calls:
+                                yield ChatEvent(
+                                    kind="done",
+                                    finish_reason="tool_calls",
+                                    tool_calls=calls,
+                                )
                         return
-                    event = _parse_event_data(data_str)
+                    event, fragments = _parse_event_data_full(data_str)
+                    if fragments:
+                        _accumulate_tool_calls(tool_acc, fragments)
                     if event is None:
                         continue
                     if event.kind == "reasoning":
@@ -242,6 +337,11 @@ async def stream_completion(
                             yield ChatEvent(kind="reasoning_end", content=text)
                         yield event
                     else:
+                        if event.kind == "done":
+                            calls = _build_tool_calls(tool_acc)
+                            if calls:
+                                event.tool_calls = calls
+                            done_seen = True
                         yield event
             text = take_reasoning()
             if text:

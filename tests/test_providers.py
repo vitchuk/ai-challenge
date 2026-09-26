@@ -213,3 +213,184 @@ def test_classify_generic_error_has_no_code():
     # код возвращается только для 400 с признаком контекста
     code, _ = _classify_upstream_error(500, "maximum context length is 1 tokens")
     assert code is None
+
+
+def test_parse_event_data_full_extracts_tool_call_fragments():
+    from server.providers.engine import _parse_event_data_full
+
+    raw = (
+        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+        '"function":{"name":"get_item","arguments":"{\\"id\\""}}]}}]}'
+    )
+    event, fragments = _parse_event_data_full(raw)
+    assert event is None
+    assert fragments[0]["name"] == "get_item"
+    assert fragments[0]["arguments"] == '{"id"'
+
+
+def test_stream_accumulates_tool_calls_into_done():
+    """Фрагменты tool_calls склеиваются, а done несёт готовые вызовы."""
+    import asyncio
+    import json
+
+    import httpx
+
+    from server.providers.engine import stream_completion
+    from server.providers.routing import resolve_provider
+    from server.services.generation import GenerationSettings
+    from tests.conftest import MockTransport
+
+    def d(payload):
+        return f"data: {json.dumps(payload)}\n\n".encode()
+
+    chunks = [
+        d(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_item",
+                                        "arguments": '{"resource"',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ),
+        d(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {
+                                        "arguments": ': "posts", "id": 1}'
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ),
+        d({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        b"data: [DONE]\n\n",
+    ]
+    client = httpx.AsyncClient(transport=MockTransport(chunks))
+    spec = resolve_provider("deepseek-chat", "sk", "zen", "sess")
+
+    async def run():
+        events = []
+        async for event in stream_completion(
+            client, spec, [{"role": "user", "content": "x"}], GenerationSettings()
+        ):
+            events.append(event)
+        await client.aclose()
+        return events
+
+    events = asyncio.run(run())
+    done = [event for event in events if event.kind == "done"][0]
+    assert done.finish_reason == "tool_calls"
+    assert done.tool_calls == [
+        {
+            "id": "call_1",
+            "name": "get_item",
+            "arguments": '{"resource": "posts", "id": 1}',
+        }
+    ]
+
+
+def test_stream_synthesizes_done_for_tool_calls_without_finish():
+    """Даже без финального чанка tool_calls не теряются при [DONE]."""
+    import asyncio
+    import json
+
+    import httpx
+
+    from server.providers.engine import stream_completion
+    from server.providers.routing import resolve_provider
+    from server.services.generation import GenerationSettings
+    from tests.conftest import MockTransport
+
+    def d(payload):
+        return f"data: {json.dumps(payload)}\n\n".encode()
+
+    chunks = [
+        d(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "c1",
+                                    "function": {"name": "t", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    client = httpx.AsyncClient(transport=MockTransport(chunks))
+    spec = resolve_provider("deepseek-chat", "sk", "zen", "sess")
+
+    async def run():
+        events = []
+        async for event in stream_completion(
+            client, spec, [{"role": "user", "content": "x"}], GenerationSettings()
+        ):
+            events.append(event)
+        await client.aclose()
+        return events
+
+    events = asyncio.run(run())
+    done = [event for event in events if event.kind == "done"][0]
+    assert done.finish_reason == "tool_calls"
+    assert done.tool_calls[0]["name"] == "t"
+
+
+def test_stream_includes_tools_in_payload():
+    """Переданные tools уходят в тело запроса к апстриму."""
+    import asyncio
+    import json
+
+    import httpx
+
+    from server.providers.engine import stream_completion
+    from server.providers.routing import resolve_provider
+    from server.services.generation import GenerationSettings
+    from tests.conftest import MockTransport
+
+    transport = MockTransport([b"data: [DONE]\n\n"])
+    client = httpx.AsyncClient(transport=transport)
+    spec = resolve_provider("deepseek-chat", "sk", "zen", "sess")
+    tools = [{"type": "function", "function": {"name": "t"}}]
+
+    async def run():
+        async for _ in stream_completion(
+            client,
+            spec,
+            [{"role": "user", "content": "x"}],
+            GenerationSettings(),
+            tools,
+        ):
+            pass
+        await client.aclose()
+
+    asyncio.run(run())
+    body = json.loads(transport.requests[0].content)
+    assert body["tools"] == tools

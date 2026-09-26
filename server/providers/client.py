@@ -32,6 +32,7 @@ class StreamedCompletion:
         spec: ProviderSpec,
         messages: list[dict],
         settings: GenerationSettings,
+        tools: list[dict] | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """Итерирует по событиям ответа модели.
 
@@ -39,6 +40,7 @@ class StreamedCompletion:
             spec: описание вызова апстрима (endpoint/ключ/модель/заголовки).
             messages: массив сообщений OpenAI (role + content).
             settings: параметры генерации.
+            tools: OpenAI-описания доступных инструментов (или ``None``).
 
         Yields:
             События :class:`ChatEvent`.
@@ -49,7 +51,7 @@ class StreamedCompletion:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0))
         try:
-            async for event in stream_completion(client, spec, messages, settings):
+            async for event in stream_completion(client, spec, messages, settings, tools):
                 yield event
         finally:
             if owns_client:

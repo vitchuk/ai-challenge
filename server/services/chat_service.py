@@ -143,6 +143,9 @@ TASK_STAGES = (
     "done",
 )
 
+#: Максимум раундов tool calling в одном запросе (последний — без инструментов).
+MAX_TOOL_ROUNDS = 8
+
 
 class SessionKind(str, Enum):
     """Тип сессии (чата)."""
@@ -1113,13 +1116,24 @@ class ChatService:
         summary_items: Optional[list[str]] = None,
         messages: Optional[list[dict]] = None,
         prompt_kind: str = "main",
+        tools: Optional[list[dict]] = None,
+        tool_executor=None,
     ) -> AsyncIterator[dict]:
         """Выполняет стрим ответа и накапливает события для клиента.
 
         События отдаются как словари (для сериализации в SSE). Пофрагментные
         ``delta``-события движка наружу **не** передаются — текст накапливается,
-        а наружу уходит только ``reasoning_start``/``reasoning_end`` и финальное
-        ``done`` с полным ``content`` и метаданными.
+        а наружу уходит только ``reasoning_start``/``reasoning_end``, события
+        вызова инструментов (``tool_call``/``tool_result``) и финальное ``done``
+        с полным ``content`` и метаданными.
+
+        Если переданы ``tools`` и ``tool_executor``, запрос идёт в режиме
+        tool calling: модель может запросить вызовы инструментов, они
+        исполняются, результаты возвращаются модели, и так до
+        :data:`MAX_TOOL_ROUNDS` раундов. Токены всех раундов суммируются в
+        метаданные ответа; каждый раунд пишется в журнал промптов и график.
+        Обмены с инструментами в историю чата не персистятся — там остаётся
+        только итоговый текст.
 
         Args:
             runner: исполнитель :class:`StreamedCompletion`.
@@ -1132,47 +1146,143 @@ class ChatService:
                 при передаче заменяет сборку по истории/стратегии.
             prompt_kind: метка запроса для журнала промптов (``main`` или
                 действие задачи).
+            tools: OpenAI-описания доступных инструментов (или ``None``).
+            tool_executor: async-исполнитель инструмента
+                ``(name, args) -> (text, is_error)``.
 
         Yields:
             Словари событий: ``{"type": ...}``.
         """
+        # Локальный импорт: providers импортирует services (цикл на уровне модулей).
+        from ..providers.base import Usage, UsageDetails
+
         settings = generation_settings or self.settings
         self.busy = True
         start_time = time.time()
-        request_messages = (
+        base_messages = (
             messages
             if messages is not None
             else self.build_request_messages(
                 summary_items=summary_items, extra_system=extra_system
             )
         )
-        full = ""
-        usage = None
+        # Инструменты доступны только с исполнителем и без строгого JSON-режима.
+        active_tools = (
+            tools
+            if (tools and tool_executor and settings.response_format is None)
+            else None
+        )
+
+        full_parts: list[str] = []
+        total_prompt = 0
+        total_completion = 0
+        total_reasoning = 0
+        usage_seen = False
         finish_reason = None
+        working = list(base_messages)
 
         try:
-            async for event in runner.run(spec, request_messages, settings):
-                if event.kind == "delta":
-                    full += event.content
-                elif event.kind == "reasoning_start":
-                    yield {"type": "reasoning_start"}
-                elif event.kind == "reasoning_end":
-                    yield {"type": "reasoning_end", "content": event.content}
-                elif event.kind == "usage":
-                    usage = event.usage
-                elif event.kind == "done":
-                    finish_reason = event.finish_reason
-                    if event.usage is not None:
-                        usage = event.usage
+            for round_index in range(MAX_TOOL_ROUNDS + 1):
+                # Последний раунд идёт без инструментов — вынуждаем текстовый ответ.
+                last_round = round_index >= MAX_TOOL_ROUNDS
+                round_tools = None if last_round else active_tools
+                round_text = ""
+                round_usage = None
+                round_finish = None
+                round_calls = None
 
+                async for event in runner.run(spec, working, settings, round_tools):
+                    if event.kind == "delta":
+                        round_text += event.content
+                    elif event.kind == "reasoning_start":
+                        yield {"type": "reasoning_start"}
+                    elif event.kind == "reasoning_end":
+                        yield {"type": "reasoning_end", "content": event.content}
+                    elif event.kind == "usage":
+                        round_usage = event.usage
+                    elif event.kind == "done":
+                        round_finish = event.finish_reason
+                        round_calls = event.tool_calls
+                        if event.usage is not None:
+                            round_usage = event.usage
+
+                if round_text.strip():
+                    full_parts.append(round_text)
+                if round_usage is not None:
+                    usage_seen = True
+                    total_prompt += round_usage.prompt_tokens or 0
+                    total_completion += round_usage.completion_tokens or 0
+                    details = round_usage.details
+                    if details is not None and details.reasoning_tokens:
+                        total_reasoning += details.reasoning_tokens
+                finish_reason = round_finish
+                self._record_request("main", round_usage)
+                self._queue_prompt(prompt_kind, working, round_text, spec, round_usage)
+
+                if (
+                    not last_round
+                    and active_tools
+                    and round_calls
+                    and round_finish == "tool_calls"
+                ):
+                    for call in round_calls:
+                        yield {
+                            "type": "tool_call",
+                            "tool": call["name"],
+                            "args": self._parse_tool_arguments(call.get("arguments")),
+                        }
+                    working = [
+                        *working,
+                        {
+                            "role": "assistant",
+                            "content": round_text,
+                            "tool_calls": [
+                                {
+                                    "id": call["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": call["name"],
+                                        "arguments": call.get("arguments") or "{}",
+                                    },
+                                }
+                                for call in round_calls
+                            ],
+                        },
+                    ]
+                    for call in round_calls:
+                        text, is_error = await self._execute_tool(tool_executor, call)
+                        yield {
+                            "type": "tool_result",
+                            "tool": call["name"],
+                            "content": text,
+                            "is_error": is_error,
+                        }
+                        working.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call["id"],
+                                "content": text,
+                            }
+                        )
+                    continue
+                break
+
+            aggregate = (
+                Usage(
+                    prompt_tokens=total_prompt or None,
+                    completion_tokens=total_completion or None,
+                    details=UsageDetails(reasoning_tokens=total_reasoning or None),
+                )
+                if usage_seen
+                else None
+            )
+            full = "\n\n".join(part for part in full_parts if part.strip())
             meta = self.build_meta(
-                spec.model_label or spec.model, start_time, usage, finish_reason
+                spec.model_label or spec.model, start_time, aggregate, finish_reason
             )
             if summary_items:
                 meta.summarized = True
             self.append_assistant_message(full, meta)
-            self._record_request("main", usage)
-            self._queue_prompt(prompt_kind, request_messages, full, spec, usage)
             yield {
                 "type": "done",
                 "meta": meta.to_dict(),
@@ -1180,6 +1290,33 @@ class ChatService:
             }
         finally:
             self.busy = False
+
+    @staticmethod
+    def _parse_tool_arguments(raw) -> dict:
+        """Разбирает аргументы вызова инструмента из строки/словаря JSON."""
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        return {}
+
+    @staticmethod
+    async def _execute_tool(tool_executor, call: dict) -> tuple[str, bool]:
+        """Исполняет один вызов инструмента, не обрывая чат при ошибке."""
+        arguments = ChatService._parse_tool_arguments(call.get("arguments"))
+        try:
+            result = await tool_executor(call["name"], arguments)
+        except Exception as exc:  # noqa: BLE001 - ошибка уходит модели как результат
+            logger.warning("Инструмент %s завершился ошибкой: %s", call["name"], exc)
+            return f"Ошибка вызова инструмента: {exc}", True
+        if isinstance(result, tuple) and len(result) == 2:
+            return str(result[0]), bool(result[1])
+        return str(result), False
 
     def _queue_prompt(self, kind: str, messages: list[dict], response: str, spec, usage) -> None:
         """Ставит в журнал промптов запись о выполненном запросе к LLM."""

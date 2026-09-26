@@ -58,6 +58,15 @@ const logsList = document.getElementById('logs-list');
 const logsCount = document.getElementById('logs-count');
 const logsRefresh = document.getElementById('logs-refresh');
 const logsClear = document.getElementById('logs-clear');
+const viewTabMcp = document.getElementById('view-tab-mcp');
+const viewTabMcpIcon = document.getElementById('view-tab-mcp-icon');
+const mcpView = document.getElementById('mcp-view');
+const mcpList = document.getElementById('mcp-list');
+const mcpCount = document.getElementById('mcp-count');
+const mcpRefresh = document.getElementById('mcp-refresh');
+const mcpNewName = document.getElementById('mcp-new-name');
+const mcpNewType = document.getElementById('mcp-new-type');
+const mcpAdd = document.getElementById('mcp-add');
 const viewTabTasks = document.getElementById('view-tab-tasks');
 const tasksView = document.getElementById('tasks-view');
 const tasksTabList = document.getElementById('tasks-tab-list');
@@ -264,6 +273,21 @@ const LOGS_ICON_SVG =
   'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
   '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 
+// Иконка «разъём» — для кнопки-вида «MCP-серверы».
+const MCP_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6V8z"/>' +
+  '<path d="M12 18v4"/></svg>';
+
+// Метки статусов MCP-серверов.
+const MCP_STATUS_LABELS = {
+  connected: 'подключён',
+  connecting: 'подключение…',
+  error: 'ошибка',
+  disabled: 'отключён'
+};
+
 // Метки типов запросов в журнале промптов.
 const LOG_KIND_LABELS = {
   main: 'запрос',
@@ -328,6 +352,8 @@ let rules = [];
 let activeRulesId = null;
 // Журнал промптов (вкладка «Логи»): записи с сервера (в памяти сервера).
 let promptLogs = [];
+// MCP-серверы (вкладка «MCP»): конфигурация + live-статус с сервера.
+let mcpServers = [];
 
 // ── Базовые UI-утилиты ─────────────────────────────────────────────────────
 function renderTotal() {
@@ -1036,12 +1062,15 @@ function switchView(view) {
             ? 'rules'
             : view === 'logs'
               ? 'logs'
-              : 'chat';
+              : view === 'mcp'
+                ? 'mcp'
+                : 'chat';
   const isMemory = activeView === 'memory';
   const isProfile = activeView === 'profile';
   const isTasks = activeView === 'tasks';
   const isRules = activeView === 'rules';
   const isLogs = activeView === 'logs';
+  const isMcp = activeView === 'mcp';
   uiState.view = activeView;
   saveUiState();
   if (viewTabChat) {
@@ -1062,18 +1091,25 @@ function switchView(view) {
   if (viewTabLogs) {
     viewTabLogs.classList.toggle('chat__view-tab--active', isLogs);
   }
-  if (chatMain) chatMain.hidden = isMemory || isProfile || isTasks || isRules || isLogs;
+  if (viewTabMcp) {
+    viewTabMcp.classList.toggle('chat__view-tab--active', isMcp);
+  }
+  if (chatMain) {
+    chatMain.hidden = isMemory || isProfile || isTasks || isRules || isLogs || isMcp;
+  }
   if (memoryView) memoryView.hidden = !isMemory;
   if (profileView) profileView.hidden = !isProfile;
   if (tasksView) tasksView.hidden = !isTasks;
   if (rulesView) rulesView.hidden = !isRules;
   if (logsView) logsView.hidden = !isLogs;
+  if (mcpView) mcpView.hidden = !isMcp;
   updateChatLayout();
   if (isMemory) renderMemoryView();
   if (isProfile) renderProfileView();
   if (isTasks) renderTasksView();
   if (isRules) renderRulesView();
   if (isLogs) loadLogs();
+  if (isMcp) loadMcp();
 }
 
 function activeMemoryStore(chat) {
@@ -1575,6 +1611,414 @@ function renderLogsView() {
   for (const entry of promptLogs) {
     logsList.appendChild(renderLogEntry(entry));
   }
+}
+
+// ── MCP-серверы (вкладка «MCP») ─────────────────────────────────────────────
+// Конфигурация хранится на сервере (формат OpenCode: local/remote); клиент
+// синхронизирует полное состояние и показывает live-статус и инструменты.
+
+async function loadMcp() {
+  try {
+    logClient('send', 'GET /api/mcp');
+    const res = await fetch('/api/mcp');
+    if (!res.ok) {
+      logClient('receive', 'GET /api/mcp → ' + res.status);
+      return;
+    }
+    const data = await res.json();
+    logClient('receive', 'GET /api/mcp', data);
+    mcpServers = Array.isArray(data.servers) ? data.servers : [];
+  } catch (err) {
+    logClient('receive', 'GET /api/mcp — ошибка', err);
+    return;
+  }
+  if (activeView === 'mcp') renderMcpView();
+}
+
+async function syncMcp() {
+  try {
+    logClient('send', 'PUT /api/mcp', { servers: mcpServers });
+    const res = await fetch('/api/mcp', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ servers: mcpServers })
+    });
+    if (!res.ok) {
+      logClient('receive', 'PUT /api/mcp → ' + res.status);
+      return;
+    }
+    const data = await res.json();
+    logClient('receive', 'PUT /api/mcp', data);
+    mcpServers = Array.isArray(data.servers) ? data.servers : [];
+  } catch (err) {
+    logClient('receive', 'PUT /api/mcp — ошибка', err);
+    return;
+  }
+  renderMcpView();
+}
+
+function replaceMcpServer(server) {
+  if (!server) return;
+  const index = mcpServers.findIndex((s) => s.id === server.id);
+  if (index === -1) mcpServers.push(server);
+  else mcpServers[index] = server;
+  renderMcpView();
+}
+
+function renderMcpView() {
+  if (!mcpView || !mcpList) return;
+  if (mcpCount) mcpCount.textContent = mcpServers.length ? String(mcpServers.length) : '';
+  mcpList.innerHTML = '';
+  if (!mcpServers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'mcp__empty';
+    empty.textContent =
+      'MCP-серверы не настроены. Добавьте сервер ниже — например, ' +
+      'jsonplaceholder (local, stdio).';
+    mcpList.appendChild(empty);
+    return;
+  }
+  for (const server of mcpServers) {
+    mcpList.appendChild(renderMcpCard(server));
+  }
+}
+
+function mcpButton(label, variant, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `mcp-server__btn mcp-server__btn--${variant}`;
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function mcpField(label, className, value, placeholder, multiline) {
+  const field = document.createElement('label');
+  field.className = 'mcp-server__field';
+  const caption = document.createElement('span');
+  caption.className = 'mcp-server__field-label';
+  caption.textContent = label;
+  field.appendChild(caption);
+  const input = document.createElement(multiline ? 'textarea' : 'input');
+  if (!multiline) input.type = 'text';
+  input.className = `mcp-server__input ${className}`;
+  input.value = value || '';
+  if (placeholder) input.placeholder = placeholder;
+  if (multiline) input.rows = 2;
+  field.appendChild(input);
+  return field;
+}
+
+function renderMcpCard(server) {
+  const card = document.createElement('div');
+  card.className = 'mcp-server';
+  card.dataset.mcpId = server.id;
+
+  const head = document.createElement('div');
+  head.className = 'mcp-server__head';
+
+  const status = server.status || 'disabled';
+  const dot = document.createElement('span');
+  dot.className = `mcp-server__dot mcp-server__dot--${status}`;
+  dot.title = MCP_STATUS_LABELS[status] || status;
+  head.appendChild(dot);
+
+  const name = document.createElement('span');
+  name.className = 'mcp-server__name';
+  name.textContent = server.name;
+  head.appendChild(name);
+
+  const type = document.createElement('span');
+  type.className = 'mcp-server__type';
+  type.textContent = server.type === 'remote' ? 'remote · http' : 'local · stdio';
+  head.appendChild(type);
+
+  const statusEl = document.createElement('span');
+  statusEl.className = `mcp-server__status mcp-server__status--${status}`;
+  statusEl.textContent = MCP_STATUS_LABELS[status] || status;
+  head.appendChild(statusEl);
+
+  const actions = document.createElement('span');
+  actions.className = 'mcp-server__actions';
+
+  const enabledLabel = document.createElement('label');
+  enabledLabel.className = 'mcp-server__enabled-wrap';
+  enabledLabel.title = 'Подключать при старте и синхронизации';
+  const enabled = document.createElement('input');
+  enabled.type = 'checkbox';
+  enabled.className = 'mcp-server__enabled';
+  enabled.checked = server.enabled !== false;
+  enabled.addEventListener('change', () => {
+    const index = mcpServers.findIndex((s) => s.id === server.id);
+    if (index === -1) return;
+    mcpServers[index] = { ...mcpServers[index], enabled: enabled.checked };
+    syncMcp();
+  });
+  const enabledText = document.createElement('span');
+  enabledText.textContent = 'включён';
+  enabledLabel.append(enabled, enabledText);
+  actions.appendChild(enabledLabel);
+
+  if (status === 'connected' || status === 'connecting') {
+    actions.appendChild(
+      mcpButton('Отключить', 'ghost', () => disconnectMcpServer(server.id))
+    );
+    actions.appendChild(
+      mcpButton('Переподключить', 'ghost', () => connectMcpServer(server.id))
+    );
+  } else {
+    actions.appendChild(
+      mcpButton('Подключить', 'primary', () => connectMcpServer(server.id))
+    );
+  }
+  actions.appendChild(
+    mcpButton('Удалить', 'danger', () => deleteMcpServer(server.id))
+  );
+  head.appendChild(actions);
+  card.appendChild(head);
+
+  if (server.error) {
+    const error = document.createElement('div');
+    error.className = 'mcp-server__error';
+    error.textContent = server.error;
+    card.appendChild(error);
+  }
+
+  const tools = Array.isArray(server.tools) ? server.tools : [];
+  if (tools.length) {
+    const details = document.createElement('details');
+    details.className = 'mcp-server__tools';
+    const summary = document.createElement('summary');
+    summary.textContent = `Инструменты (${tools.length})`;
+    details.appendChild(summary);
+    const list = document.createElement('div');
+    list.className = 'mcp-server__tool-list';
+    for (const tool of tools) {
+      const item = document.createElement('div');
+      item.className = 'mcp-server__tool';
+      const toolName = document.createElement('span');
+      toolName.className = 'mcp-server__tool-name';
+      toolName.textContent = tool.name;
+      item.appendChild(toolName);
+      if (tool.description) {
+        const desc = document.createElement('span');
+        desc.className = 'mcp-server__tool-desc';
+        desc.textContent = tool.description;
+        item.appendChild(desc);
+      }
+      list.appendChild(item);
+    }
+    details.appendChild(list);
+    card.appendChild(details);
+  }
+
+  const config = document.createElement('div');
+  config.className = 'mcp-server__config';
+  if (server.type === 'remote') {
+    config.appendChild(
+      mcpField('URL', 'mcp-server__url', server.url, 'http://127.0.0.1:8001/mcp')
+    );
+    config.appendChild(
+      mcpField(
+        'Заголовки',
+        'mcp-server__headers',
+        formatKvLines(server.headers),
+        'Authorization=Bearer ... (по строке)',
+        true
+      )
+    );
+  } else {
+    config.appendChild(
+      mcpField(
+        'Команда',
+        'mcp-server__command',
+        joinCommand(server.command),
+        '.venv/Scripts/python.exe mcp_demo/jsonplaceholder_server.py'
+      )
+    );
+    config.appendChild(
+      mcpField(
+        'Рабочий каталог',
+        'mcp-server__cwd',
+        server.cwd,
+        'по умолчанию — каталог сервера'
+      )
+    );
+    config.appendChild(
+      mcpField(
+        'Окружение',
+        'mcp-server__env',
+        formatKvLines(server.environment),
+        'KEY=VALUE (по строке)',
+        true
+      )
+    );
+  }
+  config.appendChild(
+    mcpField('Таймаут, мс', 'mcp-server__timeout', String(server.timeout || 5000), '5000')
+  );
+
+  const hint = document.createElement('span');
+  hint.className = 'mcp-server__hint';
+  config.appendChild(hint);
+  config.appendChild(
+    mcpButton('Сохранить', 'primary', () => saveMcpServer(server.id, card))
+  );
+  card.appendChild(config);
+
+  return card;
+}
+
+function readMcpCard(card, server) {
+  const next = { ...server };
+  const command = card.querySelector('.mcp-server__command');
+  if (command) next.command = splitCommand(command.value);
+  const cwd = card.querySelector('.mcp-server__cwd');
+  if (cwd) next.cwd = cwd.value.trim() || null;
+  const environment = card.querySelector('.mcp-server__env');
+  if (environment) next.environment = parseKvLines(environment.value);
+  const url = card.querySelector('.mcp-server__url');
+  if (url) next.url = url.value.trim();
+  const headers = card.querySelector('.mcp-server__headers');
+  if (headers) next.headers = parseKvLines(headers.value);
+  const timeout = card.querySelector('.mcp-server__timeout');
+  if (timeout) {
+    const value = parseInt(timeout.value, 10);
+    next.timeout = Number.isFinite(value) && value > 0 ? value : 5000;
+  }
+  const enabled = card.querySelector('.mcp-server__enabled');
+  if (enabled) next.enabled = enabled.checked;
+  return next;
+}
+
+async function saveMcpServer(id, card) {
+  const index = mcpServers.findIndex((s) => s.id === id);
+  if (index === -1) return;
+  const next = readMcpCard(card, mcpServers[index]);
+  const hint = card.querySelector('.mcp-server__hint');
+  const invalidUrl =
+    next.type === 'remote' && !/^https?:\/\/\S+/.test(next.url || '');
+  const invalidCommand =
+    next.type !== 'remote' && (!next.command || !next.command.length);
+  if (invalidUrl || invalidCommand) {
+    if (hint) {
+      hint.textContent = invalidUrl
+        ? 'Укажите URL вида http://…'
+        : 'Укажите команду запуска сервера';
+    }
+    return;
+  }
+  if (hint) hint.textContent = '';
+  mcpServers[index] = next;
+  await syncMcp();
+}
+
+function createMcpServer() {
+  const name = (mcpNewName.value || '').trim();
+  if (!name) {
+    mcpNewName.focus();
+    return;
+  }
+  const type = mcpNewType.value === 'remote' ? 'remote' : 'local';
+  mcpServers.push({
+    id: `mcp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name,
+    type,
+    enabled: true,
+    command: [],
+    environment: {},
+    cwd: null,
+    url: '',
+    headers: {},
+    timeout: 5000,
+    status: 'disabled',
+    error: '',
+    tools: []
+  });
+  mcpNewName.value = '';
+  renderMcpView();
+}
+
+async function deleteMcpServer(id) {
+  const server = mcpServers.find((s) => s.id === id);
+  if (!server) return;
+  if (!confirm(`Удалить MCP-сервер «${server.name}»?`)) return;
+  mcpServers = mcpServers.filter((s) => s.id !== id);
+  await syncMcp();
+}
+
+async function connectMcpServer(id) {
+  try {
+    logClient('send', `POST /api/mcp/${id}/connect`);
+    const res = await fetch(`/api/mcp/${id}/connect`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    logClient('receive', `POST /api/mcp/${id}/connect → ${res.status}`, data);
+    if (data.server) replaceMcpServer(data.server);
+  } catch (err) {
+    logClient('receive', `POST /api/mcp/${id}/connect — ошибка`, err);
+  }
+}
+
+async function disconnectMcpServer(id) {
+  try {
+    logClient('send', `POST /api/mcp/${id}/disconnect`);
+    const res = await fetch(`/api/mcp/${id}/disconnect`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    logClient('receive', `POST /api/mcp/${id}/disconnect → ${res.status}`, data);
+    if (data.server) replaceMcpServer(data.server);
+  } catch (err) {
+    logClient('receive', `POST /api/mcp/${id}/disconnect — ошибка`, err);
+  }
+}
+
+function splitCommand(text) {
+  const out = [];
+  let current = '';
+  let quote = null;
+  for (const ch of String(text || '')) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (/\s/.test(ch)) {
+      if (current) {
+        out.push(current);
+        current = '';
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+function joinCommand(argv) {
+  return (argv || [])
+    .map((part) => (/\s/.test(part) ? `"${part}"` : part))
+    .join(' ');
+}
+
+function parseKvLines(text) {
+  const out = {};
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const index = line.indexOf('=');
+    if (index <= 0) continue;
+    const key = line.slice(0, index).trim();
+    const value = line.slice(index + 1).trim();
+    if (key && value) out[key] = value;
+  }
+  return out;
+}
+
+function formatKvLines(map) {
+  if (!map || typeof map !== 'object') return '';
+  return Object.entries(map)
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
 }
 
 // ── Профили пользователя (глобальная сущность) ─────────────────────────────
@@ -2919,6 +3363,53 @@ function finishReasoning(el) {
   if (spinner) spinner.remove();
 }
 
+// Сворачиваемые блоки вызовов MCP-инструментов в бабле ассистента. Блоки
+// живут только в live-стриме (в историю чата не персистятся).
+function appendToolCall(el, tool, args) {
+  el.classList.remove('message--empty');
+  const block = document.createElement('details');
+  block.className = 'message__tool';
+  const summary = document.createElement('summary');
+  summary.className = 'message__tool-summary';
+  summary.textContent = `Инструмент ${tool}`;
+  block.appendChild(summary);
+
+  const body = document.createElement('div');
+  body.className = 'message__tool-body';
+  const argsEl = document.createElement('pre');
+  argsEl.className = 'message__tool-args';
+  argsEl.textContent = JSON.stringify(args ?? {}, null, 2);
+  body.appendChild(argsEl);
+  const resultEl = document.createElement('pre');
+  resultEl.className = 'message__tool-result';
+  resultEl.hidden = true;
+  body.appendChild(resultEl);
+  block.appendChild(body);
+
+  const content = el.querySelector('.message__content');
+  if (content) el.insertBefore(block, content);
+  else el.appendChild(block);
+
+  if (!el._toolBlocks) el._toolBlocks = new Map();
+  const stack = el._toolBlocks.get(tool) || [];
+  stack.push({ block, resultEl });
+  el._toolBlocks.set(tool, stack);
+}
+
+function appendToolResult(el, tool, content, isError) {
+  const stack = el._toolBlocks ? el._toolBlocks.get(tool) : null;
+  const entry = stack && stack.length ? stack[stack.length - 1] : null;
+  if (!entry) {
+    appendToolCall(el, tool, {});
+    appendToolResult(el, tool, content, isError);
+    return;
+  }
+  entry.resultEl.hidden = false;
+  entry.resultEl.textContent = content || '(пустой результат)';
+  entry.resultEl.classList.toggle('message__tool-result--error', !!isError);
+  entry.block.classList.add('message__tool--done');
+}
+
 function renderJsonEnvelope(chat, el, thinking, response, date, usage) {
   el.classList.remove('message--empty');
   const contentEl = el.querySelector('.message__content');
@@ -3024,6 +3515,12 @@ async function streamAssistant(chat, qaEl) {
         }
       } else if (chunk.type === 'request_log') {
         handleRequestLog(chat, chunk.record);
+      } else if (chunk.type === 'tool_call') {
+        appendToolCall(assistantEl, chunk.tool, chunk.args);
+        scrollChatToBottom(chat);
+      } else if (chunk.type === 'tool_result') {
+        appendToolResult(assistantEl, chunk.tool, chunk.content, chunk.is_error);
+        scrollChatToBottom(chat);
       } else if (chunk.type === 'facts') {
         chat.facts = Array.isArray(chunk.items) ? chunk.items : [];
         if (chat.id === activeChatId) renderFactsPanel(chat);
@@ -3813,6 +4310,27 @@ if (logsClear) {
   logsClear.addEventListener('click', clearLogs);
 }
 
+if (viewTabMcp) {
+  viewTabMcp.addEventListener('click', () => switchView('mcp'));
+}
+
+if (mcpRefresh) {
+  mcpRefresh.addEventListener('click', loadMcp);
+}
+
+if (mcpAdd) {
+  mcpAdd.addEventListener('click', createMcpServer);
+}
+
+if (mcpNewName) {
+  mcpNewName.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      createMcpServer();
+    }
+  });
+}
+
 if (chartColorToggle) {
   chartColorToggle.checked = chartColorMode;
   chartColorToggle.addEventListener('change', () => {
@@ -3897,6 +4415,7 @@ applyChartCollapsed();
 renderChart();
 if (viewTabProfileIcon) viewTabProfileIcon.innerHTML = PROFILE_ICON_SVG;
 if (viewTabLogsIcon) viewTabLogsIcon.innerHTML = LOGS_ICON_SVG;
+if (viewTabMcpIcon) viewTabMcpIcon.innerHTML = MCP_ICON_SVG;
 loadUiState();
 loadModels();
 
@@ -3980,7 +4499,7 @@ function applySavedView() {
     chat.memoryActiveId = storeId;
   }
 
-  const known = ['chat', 'tasks', 'memory', 'rules', 'profile', 'logs'];
+  const known = ['chat', 'tasks', 'memory', 'rules', 'profile', 'logs', 'mcp'];
   switchView(known.includes(uiState.view) ? uiState.view : 'chat');
 }
 
@@ -3993,6 +4512,8 @@ function applySavedView() {
   await loadTasks();
   // Правила — глобальные, нужны для подмешивания в запросы.
   await loadRules();
+  // MCP-серверы — глобальные: конфигурация и live-статус для вкладки.
+  await loadMcp();
   try {
     const restored = await restoreSessions();
     restoredSessions = restored.sessions;

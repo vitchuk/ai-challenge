@@ -103,6 +103,12 @@ CREATE TABLE IF NOT EXISTS app_rules (
     items       TEXT NOT NULL DEFAULT '[]',
     updated_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    config      TEXT NOT NULL DEFAULT '{}',
+    updated_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -489,6 +495,45 @@ class SessionStore:
             )
             for row in rows
         ]
+
+    def save_mcp_servers(self, servers: list[dict]) -> None:
+        """Перезаписывает конфигурации MCP-серверов (полный синк).
+
+        Args:
+            servers: полный список конфигураций (словари ``to_dict``).
+        """
+        with self._conn:
+            self._conn.execute("DELETE FROM mcp_servers")
+            for server in servers:
+                self._conn.execute(
+                    "INSERT INTO mcp_servers (id, name, config, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        str(server.get("id", "")),
+                        str(server.get("name", "")),
+                        json.dumps(server, ensure_ascii=False),
+                        time.time(),
+                    ),
+                )
+
+    def load_mcp_servers(self) -> list[dict]:
+        """Загружает конфигурации MCP-серверов из БД.
+
+        Returns:
+            Список словарей конфигураций в порядке сохранения.
+        """
+        rows = self._conn.execute(
+            "SELECT config FROM mcp_servers ORDER BY updated_at, id"
+        ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            try:
+                data = json.loads(row["config"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                result.append(data)
+        return result
 
     def save_history(self, session_id: str, records: list[MessageRecord]) -> None:
         """Перезаписывает историю сессии целиком (для снапшота при ветвлении).

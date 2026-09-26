@@ -48,6 +48,12 @@ class RulesSyncRequest(BaseModel):
     rules: list[dict[str, Any]] = []
 
 
+class McpSyncRequest(BaseModel):
+    """Тело ``PUT /api/mcp`` — полное состояние MCP-серверов."""
+
+    servers: list[dict[str, Any]] = []
+
+
 class TaskAdvanceRequest(BaseModel):
     """Тело ``POST /api/tasks/{id}/advance`` — действие протокола «Задачи»."""
 
